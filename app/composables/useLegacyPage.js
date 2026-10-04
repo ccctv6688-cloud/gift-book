@@ -1,6 +1,9 @@
-import { loadScript, withBase } from '~/utils/load-script'
+import { withBase } from '~/utils/load-script'
 
-export function useLegacyPage({ title, bodyClass, styles, scripts, start }) {
+/**
+ * 挂载旧版页面逻辑，并在 Nuxt 页面卸载时恢复全局样式和释放资源。
+ */
+export function useLegacyPage({ title, bodyClass, styles, start }) {
   const error = ref('')
   const ready = ref(false)
   let active = true
@@ -18,10 +21,6 @@ export function useLegacyPage({ title, bodyClass, styles, scripts, start }) {
     bodyStyle = document.body.style.cssText
     rootStyle = document.documentElement.style.cssText
     try {
-      for (const src of scripts) {
-        await loadScript(src)
-        if (!active) return
-      }
       instance = start()
       await instance.ready
       if (active) ready.value = true

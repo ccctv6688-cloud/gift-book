@@ -1,3 +1,6 @@
+import * as PDFLib from 'pdf-lib'
+import fontkit from '@pdf-lib/fontkit'
+
 /**
  * GiftRegistryPDF - 样式配置优化版
  * 仅优化了配置解析和样式管理，核心绘图和布局逻辑保持原样，确保 PDF 输出完全一致。
@@ -664,3 +667,5 @@ class GiftRegistryPDF {
         return pdfDoc.save();
     }
 }
+
+export { GiftRegistryPDF }

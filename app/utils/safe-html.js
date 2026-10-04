@@ -1,10 +1,16 @@
 import DOMPurify from 'dompurify'
 
+/**
+ * 转义普通文本中的 HTML 特殊字符，避免被当成标签执行。
+ */
 export function escapeHtml(value) {
   const entities = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }
   return String(value ?? '').replace(/[&<>"']/g, character => entities[character])
 }
 
+/**
+ * 清洗富文本备注，只保留允许的文字格式标签和安全样式。
+ */
 export function sanitizeRichText(value) {
   const fragment = DOMPurify.sanitize(String(value ?? ''), {
     ALLOWED_TAGS: ['div', 'p', 'br', 'b', 'strong', 'i', 'em', 'u', 's', 'strike', 'span', 'font', 'ul', 'ol', 'li'],

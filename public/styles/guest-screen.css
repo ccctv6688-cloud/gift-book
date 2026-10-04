@@ -34,13 +34,13 @@ body {
 }
 
 /* ==================== 动态布局 ==================== */
-#layout-root {
+.guest-layout-root {
   display: flex;
   width: 100vw;
   height: 100vh;
 }
 
-#qr-code-area {
+.guest-qr-code-area {
   width: 28%;
   flex-shrink: 0;
   background-color: #ffffff;
@@ -53,12 +53,12 @@ body {
   padding: 2rem 1.5rem;
 }
 
-#layout-root.layout-right #qr-code-area {
+.guest-layout-root.layout-right .guest-qr-code-area {
   border-right: none;
   border-left: 2px solid var(--primary-border-color);
 }
 
-#app-container {
+.guest-app-container {
   flex: 1;
   min-width: 0;
   height: 100%;
@@ -224,7 +224,7 @@ body {
 }
 
 /* ==================== 顶部控件 (无修改) ==================== */
-#top-right-controls {
+.top-right-controls {
   position:absolute;
   top: 20px;
   right: 20px;
@@ -233,8 +233,7 @@ body {
   align-items: center;
   gap: 15px;
 }
-#fullscreen-btn,
-#settings-btn {
+.screen-icon-btn {
   background: none;
   border: none;
   cursor: pointer;
@@ -245,17 +244,15 @@ body {
   align-items: center;
   justify-content: center;
 }
-#fullscreen-icon,
-#settings-icon {
+.screen-icon {
   color: var(--primary-color);
 }
-#fullscreen-btn:hover,
-#settings-btn:hover {
+.screen-icon-btn:hover {
   background-color: rgba(0, 0, 0, 0.05);
 }
 
 /* ==================== 全屏提示 (无修改) ==================== */
-#fullscreen-hint {
+.fullscreen-hint {
   position: fixed;
   bottom: 30px;
   left: 50%;
@@ -280,17 +277,17 @@ body {
 }
 
 /* ==================== 弹窗样式 (无修改) ==================== */
-#modal-container {
+.legacy-modal-container {
   font-family: "Inter", "Microsoft YaHei", sans-serif;
 }
-#modal {
+.legacy-modal {
   display: flex;
   flex-direction: column;
   max-height: 90vh;
   max-width: 700px;
   width: 90vw;
 }
-#modal-content {
+.legacy-modal-content {
   flex: 1;
   overflow-y: auto;
   padding-right: 0.5rem;

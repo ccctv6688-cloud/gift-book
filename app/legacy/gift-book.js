@@ -1,191 +1,16 @@
 import { createLegacyScope } from './scope'
+import CryptoJS from 'crypto-js'
 import { escapeHtml } from '~/utils/safe-html'
-import { loadScript, loadPdfTools, withBase } from '~/utils/load-script'
+import { withBase } from '~/utils/load-script'
 import { SessionManager, PasswordCache, clearLegacyCredentials } from './session'
 import { isTrustedMessage } from '~/utils/guest-messages'
+import { loadExcelTools, loadGridTools, loadPdfGenerator } from './dependency-loaders'
+import { writeGiftExcel } from './excel-export'
+import { CONFIG, DEFAULT_PRINT_OPTIONS, Utils } from './gift-book-core'
 
 export function startGiftBook(forms) {
   const scope = createLegacyScope()
   const { listen, setTimeout, requestIdleCallback } = scope
-
-  /**
-   * 应用配置常量
-   * 集中管理所有全局配置参数，便于统一维护和调整
-   */
-  const CONFIG = {
-    /**
-     * 每页显示的礼金记录数量
-     * 影响：
-     * - 主界面礼簿显示
-     * - 打印PDF每页容量
-     * - 分页导航计算
-     */
-    ITEMS_PER_PAGE: 12,
-  
-    /**
-     * 礼簿封面图最大文件大小（2MB）
-     * 超过此大小的图片将被拒绝上传
-     * 原因：避免 IndexedDB 存储压力和打印性能问题
-     */
-    MAX_COVER_SIZE: 2 * 1024 * 1024,
-  
-    /**
-     * 打印分批阈值（1008 条记录 = 84 页）
-     * 超过此数量将启用分批打印模式
-     * 原因：
-     * - 防止浏览器渲染大量 DOM 导致卡死
-     * - 避免内存溢出
-     * - 提高打印成功率
-     * 同时用于 GridJS 表格分页判断
-     */
-    PRINT_SPLIT_THRESHOLD: 1008,
-    APP_NAME: "电子礼簿系统 - 专业版",
-    DB_NAME: "GiftRegistryDB",
-    DB_VERSION: 1,
-    /**
-     * 宾客等级系统配置
-     * 使用数组存储等级名称，索引即为等级权重（用于排序）
-     * 索引越大，等级越高，在打印/导出时排名越靠前
-     * 索引范围：0-4
-     */
-    GUEST_LEVELS: ["普宾", ...Array.from({ length: 100 }, (_, index) => `排序${100 - index}`)],
-    PASSWORD_CACHE_DURATION: 5,
-  };
-  
-  const DEFAULT_PRINT_OPTIONS = Object.freeze({
-    printCover: true,
-    printEndPage: true,
-    printAppendix: true,
-    printSummary: true,
-    printAbolished: true,
-    showCoverTitle: true,
-    pdfEngine: "browser",
-  });
-  
-  /**
-   * 工具类 - 提供通用工具方法
-   * 集中管理数据格式化、转换等通用功能
-   */
-  class Utils {
-    /**
-     * 格式化金额为人民币格式
-     * @param {number} amount - 金额数值
-     * @returns {string} 格式化后的字符串，如 "￥1,234.56"
-     */
-    static formatCurrency(amount) {
-      return new Intl.NumberFormat("zh-CN", {
-        style: "currency",
-        currency: "CNY",
-      }).format(amount || 0);
-    }
-  
-    /**
-     * 将数字金额转换为中文大写金额
-     * @param {number|string} n - 要转换的金额
-     * @returns {string} 中文大写金额字符串
-     * @example
-     */
-    static amountToChinese(n) {
-      if (typeof n !== "number" && typeof n !== "string") return "";
-      n = parseFloat(n);
-      if (isNaN(n) || n === null) return "";
-      if (n === 0) return "零元整";
-  
-      let unit = "京亿万仟佰拾兆万仟佰拾亿仟佰拾万仟佰拾元角分";
-      let str = "";
-      let s = n.toString();
-  
-      if (s.indexOf(".") > -1) s = (n * 100).toFixed(0);
-      else s += "00";
-  
-      if (s.length > unit.length) return "金额过大";
-      unit = unit.substr(unit.length - s.length);
-  
-      for (let i = 0; i < s.length; i++) {
-        str += "零壹贰叁肆伍陆柒捌玖".charAt(s.charAt(i)) + unit.charAt(i);
-      }
-  
-      return str
-        .replace(/零(仟|佰|拾|角)/g, "零")
-        .replace(/(零)+/g, "零")
-        .replace(/零(兆|万|亿|元)/g, "$1")
-        .replace(/(兆|亿)万/g, "$1")
-        .replace(/(京|兆)亿/g, "$1")
-        .replace(/(京)兆/g, "$1")
-        .replace(/(亿)万/g, "$1")
-        .replace(/(京|兆|亿|仟|佰|拾)(万?)(.)/g, "$1$2$3")
-        .replace(/零元/g, "元")
-        .replace(/零分/g, "")
-        .replace(/零角/g, "零")
-        .replace(/元$/g, "元整")
-        .replace(/角$/g, "角整");
-    }
-  
-    /**
-     * 将文件读取为 Base64 编码字符串
-     * @param {File} file - 要读取的文件对象
-     * @returns {Promise<string>} Base64 编码的数据 URL（包含 data:image/...;base64, 前缀）
-     * @throws {Error} 文件读取失败时抛出错误
-     * 用途：将礼簿封面图存储到 IndexedDB
-     */
-    static async readFileAsBase64(file) {
-      return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
-    }
-  
-    /**
-     * 获取当前日期时间的格式化字符串
-     * @returns {{date: string, time: string}} 包含 date 和 time 的对象
-     * @example
-     *   Utils.getCurrentDateTime()
-     *   // => { date: "2025-10-12", time: "14:30" }
-     * 用途：为创建事项表单设置默认时间
-     */
-    static getCurrentDateTime() {
-      const now = new Date();
-      const pad = (num) => num.toString().padStart(2, "0");
-      const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
-      const time = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
-      return { date, time };
-    }
-  
-    /**
-     */
-    static getEventDateInfo(dateInput) {
-      const date = new Date(dateInput);
-      if (Number.isNaN(date.getTime())) {
-        return { date, formattedDisplay: "", localeDate: "" };
-      }
-      const formattedDisplay = `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
-      return {
-        date,
-        formattedDisplay,
-        localeDate: date.toLocaleDateString("zh-CN"),
-      };
-    }
-  
-    /**
-     * 生成用于文件名的时间戳
-     * @param {Date} date
-     * @returns {string} yyyy-mm-dd hh:mm:ss
-     */
-    static formatTimestampForFilename(date = new Date()) {
-      const pad = (num) => num.toString().padStart(2, "0");
-      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
-    }
-  
-    /**
-     * @returns {boolean}
-     */
-    static isMobile() {
-      // 一个通用且可靠的移动设备检测方法
-      return /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-    }
-  }
   
   /**
    * 加密管理器 - 处理所有加密相关操作
@@ -419,50 +244,53 @@ export function startGiftBook(forms) {
   
     cacheElements() {
       const $ = (id) => document.getElementById(id);
+      const vueElements = forms.getElements?.() || {};
       return {
-        setupScreen: $("setup-screen"),
-        mainScreen: $("main-screen"),
-        eventSelector: $("event-selector"),
-        unlockEventBtn: $("unlock-event-btn"),
-        deleteSelectedEventBtn: $("delete-selected-event-btn"),
-        createEventForm: $("create-event-form"),
-        addGiftForm: $("add-gift-form"),
-        giftBookContent: $("gift-book-content"),
-        totalAmountEl: $("total-amount"),
-        pageSubtotalEl: $("page-subtotal"),
-        totalGiversEl: $("total-givers"),
-        pageInfoEl: $("page-info"),
-        prevPageBtn: $("prev-page-btn"),
-        nextPageBtn: $("next-page-btn"),
-        currentEventTitleEl: $("current-event-title"),
-        eventSwitcherTrigger: $("event-switcher-trigger"),
-        eventDropdown: $("event-dropdown"),
-        printBtn: $("print-btn"),
-        exportExcelBtn: $("export-excel-btn"),
-        statsBtn: $("stats-btn"),
-        searchNameInput: $("search-name"),
-        searchIcon: $("search-icon"),
-        selectEventSection: $("select-event-section"),
-        speechToggle: $("speech-toggle"),
-        modalContainer: $("modal-container"),
-        modal: $("modal"),
-        modalTitle: $("modal-title"),
-        modalContent: $("modal-content"),
-        modalActions: $("modal-actions"),
-        modalCloseBtn: $("modal-close-btn"),
-        guestNameInput: $("guest-name"),
-        giftAmountInput: $("gift-amount"),
-        eventNameInput: $("event-name"),
-        startDateInput: $("start-date"),
-        startTimeInput: $("start-time"),
-        endDateInput: $("end-date"),
-        endTimeInput: $("end-time"),
-        adminPasswordInput: $("admin-password"),
-        eventThemeSelect: $("event-theme"),
-        eventVoiceSelect: $("event-voice"),
-        previewCreateVoiceBtn: $("preview-create-voice-btn"),
-        fullscreenBtn: $("fullscreen-btn"),
-        fullscreenIcon: $("fullscreen-icon"),
+        setupScreen: vueElements.setupScreen ?? $("setup-screen"),
+        mainScreen: vueElements.mainScreen ?? $("main-screen"),
+        eventSelector: vueElements.eventSelector ?? $("event-selector"),
+        unlockEventBtn: vueElements.unlockEventBtn ?? $("unlock-event-btn"),
+        deleteSelectedEventBtn: vueElements.deleteSelectedEventBtn ?? $("delete-selected-event-btn"),
+        createEventForm: vueElements.createEventForm ?? $("create-event-form"),
+        addGiftForm: vueElements.addGiftForm ?? $("add-gift-form"),
+        giftBookContent: vueElements.giftBookContent ?? $("gift-book-content"),
+        totalAmountEl: vueElements.totalAmountEl ?? $("total-amount"),
+        pageSubtotalEl: vueElements.pageSubtotalEl ?? $("page-subtotal"),
+        totalGiversEl: vueElements.totalGiversEl ?? $("total-givers"),
+        totalsVisibilityBtn: vueElements.totalsVisibilityBtn ?? $("totals-visibility-btn"),
+        pageInfoEl: vueElements.pageInfoEl ?? $("page-info"),
+        prevPageBtn: vueElements.prevPageBtn ?? $("prev-page-btn"),
+        nextPageBtn: vueElements.nextPageBtn ?? $("next-page-btn"),
+        currentEventTitleEl: vueElements.currentEventTitleEl ?? $("current-event-title"),
+        eventSwitcherTrigger: vueElements.eventSwitcherTrigger ?? $("event-switcher-trigger"),
+        eventDropdown: vueElements.eventDropdown ?? $("event-dropdown"),
+        printBtn: vueElements.printBtn ?? $("print-btn"),
+        exportExcelBtn: vueElements.exportExcelBtn ?? $("export-excel-btn"),
+        statsBtn: vueElements.statsBtn ?? $("stats-btn"),
+        searchNameInput: vueElements.searchNameInput ?? $("search-name"),
+        searchIcon: vueElements.searchIcon ?? $("search-icon"),
+        selectEventSection: vueElements.selectEventSection ?? $("select-event-section"),
+        speechToggle: vueElements.speechToggle ?? $("speech-toggle"),
+        orText: vueElements.orText ?? $("or-text"),
+        modalContainer: vueElements.modalContainer ?? $("modal-container"),
+        modal: vueElements.modal ?? $("modal"),
+        modalTitle: vueElements.modalTitle ?? $("modal-title"),
+        modalContent: vueElements.modalContent ?? $("modal-content"),
+        modalActions: vueElements.modalActions ?? $("modal-actions"),
+        modalCloseBtn: vueElements.modalCloseBtn ?? $("modal-close-btn"),
+        guestNameInput: vueElements.guestNameInput ?? $("guest-name"),
+        giftAmountInput: vueElements.giftAmountInput ?? $("gift-amount"),
+        eventNameInput: vueElements.eventNameInput ?? $("event-name"),
+        startDateInput: vueElements.startDateInput ?? $("start-date"),
+        startTimeInput: vueElements.startTimeInput ?? $("start-time"),
+        endDateInput: vueElements.endDateInput ?? $("end-date"),
+        endTimeInput: vueElements.endTimeInput ?? $("end-time"),
+        adminPasswordInput: vueElements.adminPasswordInput ?? $("admin-password"),
+        eventThemeSelect: vueElements.eventThemeSelect ?? $("event-theme"),
+        eventVoiceSelect: vueElements.eventVoiceSelect ?? $("event-voice"),
+        previewCreateVoiceBtn: vueElements.previewCreateVoiceBtn ?? $("preview-create-voice-btn"),
+        fullscreenBtn: vueElements.fullscreenBtn ?? $("fullscreen-btn"),
+        fullscreenIcon: vueElements.fullscreenIcon ?? $("fullscreen-icon"),
         supportBtn: $("support-btn"),
       };
     }
@@ -958,9 +786,15 @@ export function startGiftBook(forms) {
         }
         return sum;
       }, 0);
-      app.ui.elements.pageSubtotalEl.textContent = Utils.formatCurrency(pageSubtotal);
-      app.ui.elements.totalAmountEl.textContent = Utils.formatCurrency(app.totalAmountCache);
+      if (app.areTotalsVisible) {
+        app.ui.elements.pageSubtotalEl.textContent = Utils.formatCurrency(pageSubtotal);
+        app.ui.elements.totalAmountEl.textContent = Utils.formatCurrency(app.totalAmountCache);
+      } else {
+        app.ui.elements.pageSubtotalEl.textContent = "******";
+        app.ui.elements.totalAmountEl.textContent = "******";
+      }
       app.ui.elements.totalGiversEl.textContent = app.totalGiversCache;
+      app.updateTotalsVisibilityButton();
     }
   
     /**
@@ -970,7 +804,7 @@ export function startGiftBook(forms) {
       const totalPages = Math.ceil(app.gifts.length / app.getItemsPerPage()) || 1;
       app.ui.elements.pageInfoEl.innerHTML = `
                     第
-                    <input type="number" id="current-page-input" value="${app.currentPage}"
+                    <input type="number" data-role="current-page-input" value="${app.currentPage}"
                           min="1" max="${totalPages}"
                           class="w-[${app.currentPage.toString().length}em] text-center bg-transparent themed-ring rounded border p-0 mx-2 font-bold focus:w-[4em]">
                     / ${totalPages} 页
@@ -1164,7 +998,7 @@ export function startGiftBook(forms) {
         const content = `
                     <div class="space-y-3 text-left">
                       <p class="text-sm text-red-600">请输入作废理由（必填）：</p>
-                      <textarea id="abolish-reason-input" class="w-full p-3 border rounded themed-ring" rows="4"
+                      <textarea data-role="abolish-reason-input" class="w-full p-3 border rounded themed-ring" rows="4"
                         placeholder="例如：重复录入、错误记录、客人撤销礼金等"
                         required></textarea>
                       <p class="text-xs text-gray-500">注：作废后，该记录将保留在系统中但不计入总金额，并且不会在打印PDF时显示。</p>
@@ -1176,7 +1010,7 @@ export function startGiftBook(forms) {
             text: "下一步",
             class: "themed-button-primary text-white px-4 py-2 rounded  ",
             handler: () => {
-              const reasonText = document.getElementById("abolish-reason-input").value.trim();
+              const reasonText = app.ui.elements.modalContent.querySelector('[data-role="abolish-reason-input"]')?.value.trim() || "";
               if (!reasonText) {
                 app.ui.showNotification("请填写作废理由。", "error");
                 return; // 保持弹窗打开
@@ -1186,7 +1020,7 @@ export function startGiftBook(forms) {
             keepOpen: true,
           },
         ]);
-        setTimeout(() => document.getElementById("abolish-reason-input")?.focus(), 50);
+        setTimeout(() => app.ui.elements.modalContent.querySelector('[data-role="abolish-reason-input"]')?.focus(), 50);
       });
   
       if (reason === null) {
@@ -1238,10 +1072,16 @@ export function startGiftBook(forms) {
     }
   }
   class ExportService {
+    /**
+     * 绑定主应用实例，统一处理打印、PDF、Excel 和备份导入导出。
+     */
     constructor(app) {
       this.app = app;
     }
 
+    /**
+     * 根据当前事项主题返回打印和 PDF 需要使用的默认图片资源。
+     */
     getThemeAssets() {
       const isSolemn = this.app.currentEvent?.theme === "theme-solemn";
       return {
@@ -1303,7 +1143,7 @@ export function startGiftBook(forms) {
         const startRecord = i * chunkSize + 1;
         const endRecord = Math.min((i + 1) * chunkSize, app.gifts.length);
         contentHtml += `
-                  <div class="print-chunk-item flex justify-between items-center p-3 rounded-lg cursor-pointer themed-link-hover"
+                  <div data-role="print-chunk-item" class="flex justify-between items-center p-3 rounded-lg cursor-pointer themed-link-hover"
                        data-start="${i * chunkSize}" data-end="${endRecord}"
                        data-part-index="${i + 1}"
                        data-original-text="生成打印第 ${i + 1} 部分 (记录 ${startRecord} - ${endRecord})">
@@ -1316,7 +1156,7 @@ export function startGiftBook(forms) {
       app.ui.showModal("分批打印/导出PDF", contentHtml, [{ text: "关闭", class: "themed-button-secondary border px-4 py-2 rounded" }]);
   
       setTimeout(() => {
-        document.querySelectorAll(".print-chunk-item").forEach((item) => {
+        app.ui.elements.modalContent.querySelectorAll('[data-role="print-chunk-item"]').forEach((item) => {
           item.onclick = async (e) => {
             const el = e.currentTarget;
             if (el.dataset.status === "completed") return;
@@ -1369,7 +1209,7 @@ export function startGiftBook(forms) {
         printBtn.disabled = true;
         printBtn.innerHTML = '<i class="ri-loader-4-line animate-spin mr-2"></i>正在生成...';
         app.ui.showNotification("正在生成 PDF 文件，请稍候...", "info");
-        await loadPdfTools();
+        const GiftRegistryPDF = await loadPdfGenerator();
         if (scope.disposed) return;
   
         // ====================== 1. 解析自定义配置（统一处理“自定义 or 兜底”） ======================
@@ -1778,7 +1618,7 @@ export function startGiftBook(forms) {
       }
   
       // 在弹出其他验证弹窗之前缓存复选框状态，避免 DOM 被替换后读取失败
-      const shouldClearOldData = !!document.getElementById("clear-old-data-on-import")?.checked;
+      const shouldClearOldData = !!app.ui.elements.modalContent.querySelector('[data-role="clear-old-data-on-import"]')?.checked;
   
       try {
         // 定义文件格式常量
@@ -1834,7 +1674,7 @@ export function startGiftBook(forms) {
                     <p class="text-sm text-yellow-700 bg-yellow-50 p-3 rounded-md mb-3">
                       使用当前事项密码解密失败。备份文件可能使用了不同的密码。
                     </p>
-                    <input type="password" id="backup-pwd-input"
+                    <input type="password" data-role="backup-password-input"
                            class="w-full p-2 border rounded themed-ring"
                            placeholder="请输入备份文件的解密密码">
                   `;
@@ -1848,12 +1688,12 @@ export function startGiftBook(forms) {
                 text: "确认",
                 class: "themed-button-primary px-4 py-2 rounded",
                 handler: () => {
-                  const pwd = document.getElementById("backup-pwd-input").value;
+                  const pwd = app.ui.elements.modalContent.querySelector('[data-role="backup-password-input"]')?.value || "";
                   resolve(pwd);
                 },
               },
             ]);
-            setTimeout(() => document.getElementById("backup-pwd-input")?.focus(), 50);
+            setTimeout(() => app.ui.elements.modalContent.querySelector('[data-role="backup-password-input"]')?.focus(), 50);
           });
   
           if (backupPassword === null) {
@@ -1940,18 +1780,18 @@ export function startGiftBook(forms) {
                         <p class="text-sm text-gray-600">可将当前事项数据备份为 JSON 或数据库（BIN）文件，亦可导入 BIN 文件进行恢复。</p>
                       </div>
                       <div class="grid sm:grid-cols-2 gap-3">
-                        <button id="btn-backup-json" class="w-full themed-button-secondary border px-4 py-2 rounded">导出 JSON 数据</button>
-                        <button id="btn-backup-bin" class="w-full themed-button-primary px-4 py-2 rounded">导出备份 (BIN)</button>
+                        <button data-role="backup-json" class="w-full themed-button-secondary border px-4 py-2 rounded">导出 JSON 数据</button>
+                        <button data-role="backup-bin" class="w-full themed-button-primary px-4 py-2 rounded">导出备份 (BIN)</button>
                       </div>
                       <div class="border-t pt-4 space-y-3">
                         <label class="block text-sm font-medium text-gray-700">导入备份文件</label>
-                        <input type="file" id="backup-import-file" accept=".bin" class="w-full text-sm text-gray-600 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-gray-200 file:text-gray-700 hover:file:bg-gray-300" />
-                        <div class="flex items-center mt-2">
-                          <input type="checkbox" id="clear-old-data-on-import" class="h-4 w-4 themed-ring rounded border-gray-300">
-                          <label for="clear-old-data-on-import" class="ml-2 block text-sm text-gray-800">导入前清空当前事项的所有旧数据</label>
-                        </div>
+                        <input type="file" data-role="backup-import-file" accept=".bin" class="w-full text-sm text-gray-600 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-gray-200 file:text-gray-700 hover:file:bg-gray-300" />
+                        <label class="flex items-center mt-2 cursor-pointer">
+                          <input type="checkbox" data-role="clear-old-data-on-import" class="h-4 w-4 themed-ring rounded border-gray-300">
+                          <span class="ml-2 block text-sm text-gray-800">导入前清空当前事项的所有旧数据</span>
+                        </label>
                         <p class="text-xs text-gray-500 -mt-1">默认不勾选，即以追加方式导入新数据。</p>
-                        <button id="btn-restore-backup" class="w-full themed-button-primary px-4 py-2 rounded">导入并恢复</button>
+                        <button data-role="restore-backup" class="w-full themed-button-primary px-4 py-2 rounded">导入并恢复</button>
                         <p class="text-xs text-gray-500">导入时需输入当前事项的管理密码，请确保备份来源可靠。</p>
                       </div>
                     </div>
@@ -1960,10 +1800,11 @@ export function startGiftBook(forms) {
       app.ui.showModal("备份 / 恢复数据", modalContent, [{ text: "关闭", class: "themed-button-secondary border px-4 py-2 rounded" }]);
   
       setTimeout(() => {
-        const exportJsonBtn = document.getElementById("btn-backup-json");
-        const exportBinBtn = document.getElementById("btn-backup-bin");
-        const restoreBtn = document.getElementById("btn-restore-backup");
-        const fileInput = document.getElementById("backup-import-file");
+        const modalContentEl = app.ui.elements.modalContent;
+        const exportJsonBtn = modalContentEl.querySelector('[data-role="backup-json"]');
+        const exportBinBtn = modalContentEl.querySelector('[data-role="backup-bin"]');
+        const restoreBtn = modalContentEl.querySelector('[data-role="restore-backup"]');
+        const fileInput = modalContentEl.querySelector('[data-role="backup-import-file"]');
   
         if (exportJsonBtn) {
           exportJsonBtn.addEventListener("click", async () => {
@@ -2030,7 +1871,7 @@ export function startGiftBook(forms) {
                       <p class="text-sm text-gray-600">请选择本次导出方式，也可顺手确认记账人和附页设置。</p>
                       <div>
                         <label class="block text-sm font-medium text-gray-700 mb-1">记账人 <span class="text-xs text-red-400">(建议填写，非必填)</span></label>
-                        <input id="print-first-recorder" type="text" class="w-full p-2 border rounded themed-ring" maxlength="30" value="${escapeHtml(currentRecorder)}" placeholder="示例：王五">
+                        <input data-role="print-recorder" type="text" class="w-full p-2 border rounded themed-ring" maxlength="30" value="${escapeHtml(currentRecorder)}" placeholder="示例：王五">
                       </div>
                       <div>
                         <span class="block text-sm font-medium text-gray-700 mb-1">PDF渲染方式</span>
@@ -2039,23 +1880,23 @@ export function startGiftBook(forms) {
                           <span class="block text-sm font-medium text-gray-700 mb-1">礼簿附页选项</span>
                           <div class="flex gap-2 text-sm flex-wrap text-gray-700">
                             <label class="flex items-center gap-2 text-sm text-gray-700">
-                              <input id="print-init-cover" type="checkbox" class="w-4 h-4 themed-ring rounded" ${currentPrintOptions.printCover ? "checked" : ""}>
+                              <input data-role="print-cover" type="checkbox" class="w-4 h-4 themed-ring rounded" ${currentPrintOptions.printCover ? "checked" : ""}>
                               <span>封面</span>
                             </label>
                             <label class="flex items-center gap-2 text-sm text-gray-700">
-                              <input id="print-init-show-cover-title" type="checkbox" class="w-4 h-4 themed-ring rounded" ${currentPrintOptions.showCoverTitle ? "checked" : ""}>
+                              <input data-role="print-show-cover-title" type="checkbox" class="w-4 h-4 themed-ring rounded" ${currentPrintOptions.showCoverTitle ? "checked" : ""}>
                               <span>封面标题</span>
                             </label>
                             <label class="flex items-center gap-2 text-sm text-gray-700">
-                              <input id="print-init-appendix" type="checkbox" class="w-4 h-4 themed-ring rounded" ${currentPrintOptions.printAppendix ? "checked" : ""}>
+                              <input data-role="print-appendix" type="checkbox" class="w-4 h-4 themed-ring rounded" ${currentPrintOptions.printAppendix ? "checked" : ""}>
                               <span>备注附录</span>
                             </label>
                             <label class="flex items-center gap-2 text-sm text-gray-700">
-                              <input id="print-init-summary" type="checkbox" class="w-4 h-4 themed-ring rounded" ${currentPrintOptions.printSummary ? "checked" : ""}>
+                              <input data-role="print-summary" type="checkbox" class="w-4 h-4 themed-ring rounded" ${currentPrintOptions.printSummary ? "checked" : ""}>
                               <span>总计页</span>
                             </label>
                             <label class="flex items-center gap-2 text-sm text-gray-700">
-                              <input id="print-init-end-page" type="checkbox" class="w-4 h-4 themed-ring rounded" ${currentPrintEndPage ? "checked" : ""}>
+                              <input data-role="print-end-page" type="checkbox" class="w-4 h-4 themed-ring rounded" ${currentPrintEndPage ? "checked" : ""}>
                               <span>封底</span>
                             </label>
                           </div>
@@ -2077,15 +1918,17 @@ export function startGiftBook(forms) {
             keepOpen: true,
             handler: async () => {
               try {
-                const recorderInput = document.getElementById("print-first-recorder");
+                const modalContentEl = app.ui.elements.modalContent;
+                const getPrintOption = (role) => modalContentEl.querySelector(`[data-role="${role}"]`);
+                const recorderInput = getPrintOption("print-recorder");
                 const recorderValue = recorderInput ? recorderInput.value.trim() : "";
-                const selectedEngine = isMobile ? "pdf-lib" : document.querySelector('input[name="print-engine-select"]:checked')?.value || "browser";
+                const selectedEngine = isMobile ? "pdf-lib" : modalContentEl.querySelector('input[name="print-engine-select"]:checked')?.value || "browser";
   
-                const printCoverInput = document.getElementById("print-init-cover");
-                const showCoverTitleInput = document.getElementById("print-init-show-cover-title");
-                const printAppendixInput = document.getElementById("print-init-appendix");
-                const printSummaryInput = document.getElementById("print-init-summary");
-                const printEndPageInput = document.getElementById("print-init-end-page");
+                const printCoverInput = getPrintOption("print-cover");
+                const showCoverTitleInput = getPrintOption("print-show-cover-title");
+                const printAppendixInput = getPrintOption("print-appendix");
+                const printSummaryInput = getPrintOption("print-summary");
+                const printEndPageInput = getPrintOption("print-end-page");
                 const mergedPrintOptions = {
                   ...currentPrintOptions,
                   pdfEngine: selectedEngine,
@@ -2406,9 +2249,9 @@ export function startGiftBook(forms) {
       this.exporting = true;
       app.ui.elements.exportExcelBtn.disabled = true;
       try {
-        await loadScript('/static/xlsx.full.min.js');
+        const XLSX = await loadExcelTools();
         if (scope.disposed || !app.currentEvent) return false;
-        return this.writeExcel();
+        return this.writeExcel(XLSX);
       } catch (error) {
         console.error('Excel export failed:', error);
         app.ui.showNotification('Excel 导出失败，请重试。', 'error');
@@ -2419,131 +2262,16 @@ export function startGiftBook(forms) {
       }
     }
 
-    writeExcel() {
-      const app = this.app;
-      if (app.gifts.length === 0) {
-        app.ui.showNotification("没有可导出的数据。");
-        return;
-      }
-  
-      const formatHistoryToString = (historyArray) => {
-        if (!historyArray || historyArray.length === 0) return "无修改记录";
-        return [...historyArray]
-          .reverse()
-          .map((record, index) => {
-            const recordTime = new Date(record.timestamp).toLocaleString("zh-CN");
-            return `[${index + 1}] ${recordTime}: ${record.changeLog}`;
-          })
-          .join("\n");
-      };
-  
-      const dataToExport = [];
-      const giftSheetData = [];
-  
-      let totalAmount = 0;
-      let activeCount = 0;
-      let abolishedCount = 0;
-  
-      // 直接遍历已排序的 app.gifts 数组
-      for (let i = 0; i < app.gifts.length; i++) {
-        const g = app.gifts[i];
-        const isAbolished = g.data.abolished === true;
-        const guestLevel = g.data.guestLevel !== undefined ? g.data.guestLevel : 0;
-        const guestLevelName = CONFIG.GUEST_LEVELS[guestLevel] || CONFIG.GUEST_LEVELS[0];
-  
-        // 备注处理 - 分别提取各个字段
-        const remarkData = app.normalizeRemarkData(g.data.remarkData);
-        const customRemark = remarkData.custom || "";
-        const giftRemark = remarkData.gift || "";
-        const relationRemark = remarkData.relation || "";
-        const phoneRemark = remarkData.phone || "";
-        const addressRemark = remarkData.address || "";
-  
-        // 如果记录有效（未作废）且礼品备注不为空，则添加到礼品清单
-        if (!isAbolished && giftRemark) {
-          giftSheetData.push({
-            姓名: g.data.name,
-            礼品名称: giftRemark,
-            关系: relationRemark,
-            登记时间: new Date(g.data.timestamp).toLocaleString("zh-CN"),
-          });
-        }
-  
-        dataToExport.push({
-          姓名: g.data.name,
-          金额: g.data.amount,
-          收款类型: g.data.type,
-          宾客等级: guestLevelName,
-          备注: customRemark,
-          礼品: giftRemark,
-          关系: relationRemark,
-          电话: phoneRemark,
-          住址: addressRemark,
-          状态: isAbolished ? "已作废" : "正常",
-          作废理由: isAbolished ? g.data.abolishReason || "" : "",
-          登记时间: new Date(g.data.timestamp).toLocaleString("zh-CN"),
-          修改日志: formatHistoryToString(g.data.history),
-        });
-  
-        if (isAbolished) {
-          abolishedCount++;
-        } else {
-          activeCount++;
-          totalAmount += g.data.amount;
-        }
-      }
-  
-      dataToExport.push({});
-      dataToExport.push({
-        姓名: "总计",
-        金额: totalAmount,
-        收款类型: `有效记录 ${activeCount} 条,作废 ${abolishedCount} 条,共 ${app.gifts.length} 条`,
+    /**
+     * 调用独立的 Excel 写出方法，保留导出服务的统一入口。
+     */
+    writeExcel(XLSX) {
+      return writeGiftExcel({
+        XLSX,
+        app: this.app,
+        config: CONFIG,
+        utils: Utils,
       });
-  
-      const worksheet = XLSX.utils.json_to_sheet(dataToExport);
-  
-      // 调整列宽,为新增的列分配合适的宽度
-      const columnWidths = [
-        { wch: 10 }, // 姓名
-        { wch: 12 }, // 金额
-        { wch: 12 }, // 收款类型
-        { wch: 10 }, // 宾客等级
-        { wch: 30 }, // 备注(自定义)
-        { wch: 20 }, // 礼品 (加宽一些)
-        { wch: 15 }, // 关系
-        { wch: 18 }, // 电话
-        { wch: 25 }, // 住址
-        { wch: 10 }, // 状态
-        { wch: 30 }, // 作废理由
-        { wch: 22 }, // 登记时间
-        { wch: 60 }, // 修改日志
-      ];
-      worksheet["!cols"] = columnWidths;
-  
-      const workbook = XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(workbook, worksheet, "礼金明细");
-  
-      if (giftSheetData.length > 0) {
-        // 创建礼品清单的 worksheet
-        const giftWorksheet = XLSX.utils.json_to_sheet(giftSheetData, {
-          header: ["姓名", "礼品名称", "关系", "登记时间"], // 确保表头顺序
-        });
-  
-        // 为礼品清单设置列宽
-        giftWorksheet["!cols"] = [
-          { wch: 10 }, // 姓名
-          { wch: 30 }, // 礼品名称
-          { wch: 18 }, // 关系
-          { wch: 22 }, // 登记时间
-        ];
-  
-        // 将新的 worksheet 附加到工作簿中，
-        XLSX.utils.book_append_sheet(workbook, giftWorksheet, "礼品清单");
-      }
-      const eventDateInfo = Utils.getEventDateInfo(app.currentEvent.startDateTime);
-      XLSX.writeFile(workbook, `${app.currentEvent.name}-礼金明细(${eventDateInfo.localeDate}).xlsx`);
-      app.ui.showNotification("导出成功！", "success");
-      return true;
     }
   }
   class StatsService {
@@ -2563,8 +2291,8 @@ export function startGiftBook(forms) {
       const app = this.app;
       app.ui.elements.statsBtn.disabled = true;
       try {
-        await loadScript('/static/gridjs.umd.js');
-        if (!scope.disposed && app.currentEvent) this.renderStatistics();
+        const { Grid } = await loadGridTools();
+        if (!scope.disposed && app.currentEvent) this.renderStatistics(Grid);
       } catch (error) {
         console.error('Statistics failed:', error);
         app.ui.showNotification('统计加载失败，请重试。', 'error');
@@ -2574,7 +2302,10 @@ export function startGiftBook(forms) {
       }
     }
 
-    renderStatistics() {
+    /**
+     * 使用 Grid 表格渲染统计弹窗，并绑定统计页内的筛选和操作事件。
+     */
+    renderStatistics(Grid) {
       const app = this.app;
       app.ui.elements.modal.classList.add("modal-large");
   
@@ -2611,11 +2342,11 @@ export function startGiftBook(forms) {
   
       const statsHtml = `
                   <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
-                    <div id="grid-container" class="md:col-span-3 relative">
+                    <div data-role="stats-grid-container" class="md:col-span-3 relative">
                       <!-- 筛选栏 -->
                       <div class="w-1/2 flex items-center gap-3 sm:absolute right-0 z-40">
                         <label class="text-sm font-medium text-gray-700 whitespace-nowrap">筛选条件：</label>
-                        <select id="stats-filter-select" class="w-full p-3 border rounded-lg themed-ring pr-10">
+                        <select data-role="stats-filter-select" class="w-full p-3 border rounded-lg themed-ring pr-10">
                           <option value="all">全部记录</option>
                           <option value="max-amount">礼金最多</option>
                           <option value="min-amount">礼金最少</option>
@@ -2631,7 +2362,7 @@ export function startGiftBook(forms) {
                         </select>
                       </div>
                       <!-- GridJS 表格容器 -->
-                      <div id="grid-table-container"></div>
+                      <div data-role="stats-grid-table"></div>
                     </div>
                     <div class="space-y-4">
                       <div class="flex justify-between p-3 bg-green-50  border-green-500 rounded-lg">
@@ -2663,7 +2394,7 @@ export function startGiftBook(forms) {
                           .join("")}</ul>
                       </div>
                       <div class="border-t pt-4 mt-4">
-                        <button id="export-excel-stats-btn" class="w-full themed-button-primary p-3 rounded-lg flex items-center justify-center gap-2">
+                        <button data-role="stats-export-excel" class="w-full themed-button-primary p-3 rounded-lg flex items-center justify-center gap-2">
                           <i class="ri-file-excel-line text-xl"></i>
                           <span>导出 Excel</span>
                         </button>
@@ -2674,6 +2405,7 @@ export function startGiftBook(forms) {
       app.ui.showModal("礼金统计详情", statsHtml, [{ text: "关闭", class: "themed-button-secondary border px-4 py-2 rounded" }]);
   
       setTimeout(() => {
+        const modalContentEl = app.ui.elements.modalContent;
         let currentFilteredGifts = [...app.gifts];
         let currentGrid = null;
         const renderGrid = (giftsToShow) => {
@@ -2724,9 +2456,10 @@ export function startGiftBook(forms) {
               currentGrid.destroy();
             } catch (e) {}
           }
-          const container = document.getElementById("grid-table-container");
+          const container = modalContentEl.querySelector('[data-role="stats-grid-table"]');
+          if (!container) return;
           container.innerHTML = "";
-          currentGrid = new gridjs.Grid(gridConfig);
+          currentGrid = new Grid(gridConfig);
           currentGrid.render(container);
   
           currentGrid.on("rowClick", (...args) => {
@@ -2747,8 +2480,8 @@ export function startGiftBook(forms) {
         };
   
         renderGrid(currentFilteredGifts);
-        const filterSelect = document.getElementById("stats-filter-select");
-        filterSelect.addEventListener("change", (event) => {
+        const filterSelect = modalContentEl.querySelector('[data-role="stats-filter-select"]');
+        filterSelect?.addEventListener("change", (event) => {
           const filterType = event.target.value;
   
           switch (filterType) {
@@ -2792,7 +2525,7 @@ export function startGiftBook(forms) {
           renderGrid(currentFilteredGifts);
         });
   
-        const exportBtn = document.getElementById("export-excel-stats-btn");
+        const exportBtn = modalContentEl.querySelector('[data-role="stats-export-excel"]');
         if (exportBtn) {
           exportBtn.addEventListener("click", () => {
             app.exportService.exportToExcel();
@@ -2824,8 +2557,8 @@ export function startGiftBook(forms) {
                           <div class="font-medium text-gray-800 mt-1">${escapeHtml(record.changeLog)}</div>
                           ${
                             index === reversedHistory.length - 1
-                              ? `<button class="btn-view-original mt-2 text-xs bg-gray-200 hover:bg-gray-300 px-2 py-1 rounded text-gray-700" data-history-index="0">查看最原始记录</button>`
-                              : `<button class="btn-view-snapshot mt-2 text-xs text-blue-500 hover:underline" data-history-index="${history.length - 1 - index}">查看此版本快照</button>`
+                              ? `<button data-role="view-original" class="mt-2 text-xs bg-gray-200 hover:bg-gray-300 px-2 py-1 rounded text-gray-700" data-history-index="0">查看最原始记录</button>`
+                              : `<button data-role="view-snapshot" class="mt-2 text-xs text-blue-500 hover:underline" data-history-index="${history.length - 1 - index}">查看此版本快照</button>`
                           }
                         </li>
                       `
@@ -2997,6 +2730,7 @@ export function startGiftBook(forms) {
       this.isSpeechEnabled = true;
       this.totalAmountCache = 0;
       this.totalGiversCache = 0;
+      this.areTotalsVisible = false;
       this.cachedStats = null;
       this.statsAreDirty = true;
       this.pdfGenerator = null;
@@ -3052,7 +2786,7 @@ export function startGiftBook(forms) {
   
       if (events.length > 0) {
         this.ui.elements.selectEventSection.classList.remove("hidden");
-        document.getElementById("or-text").classList.remove("hidden");
+        this.ui.elements.orText?.classList.remove("hidden");
         events.forEach((event, index) => {
           const option = document.createElement("option");
           option.value = event.id;
@@ -3068,7 +2802,7 @@ export function startGiftBook(forms) {
         }
       } else {
         this.ui.elements.selectEventSection.classList.add("hidden");
-        document.getElementById("or-text").classList.add("hidden");
+        this.ui.elements.orText?.classList.add("hidden");
       }
     }
   
@@ -3078,6 +2812,7 @@ export function startGiftBook(forms) {
     async startSession() {
       this.ui.elements.currentEventTitleEl.textContent = this.currentEvent.name;
       this.ui.applyTheme(this.currentEvent.theme);
+      this.hideTotals();
   
       this.applyCustomGiftBookStyle();
   
@@ -3251,13 +2986,13 @@ export function startGiftBook(forms) {
   
       // 跳页功能
       this.ui.elements.pageInfoEl.addEventListener("focusout", (e) => {
-        if (e.target && e.target.id === "current-page-input") {
+        if (e.target?.dataset.role === "current-page-input") {
           this.handlePageInputChange(e);
         }
       });
   
       this.ui.elements.pageInfoEl.addEventListener("keydown", (e) => {
-        if (e.target && e.target.id === "current-page-input" && e.key === "Enter") {
+        if (e.target?.dataset.role === "current-page-input" && e.key === "Enter") {
           e.preventDefault();
           this.handlePageInputChange(e);
           e.target.blur();
@@ -3272,6 +3007,7 @@ export function startGiftBook(forms) {
           document.exitFullscreen();
         }
       });
+      this.ui.elements.totalsVisibilityBtn?.addEventListener("click", () => this.toggleTotalsVisibility());
       this.ui.elements.supportBtn?.addEventListener("click", () => this.showAuthorSupportModal());
       listen(document, "fullscreenchange", () => {
         const isFullscreen = !!document.fullscreenElement;
@@ -3354,7 +3090,7 @@ export function startGiftBook(forms) {
     handlePageInputChange(e) {
       const input = e.target;
       const newPage = parseInt(input.value, 10);
-      const totalPages = Math.ceil(this.gifts.length / app.getItemsPerPage()) || 1;
+      const totalPages = Math.ceil(this.gifts.length / this.getItemsPerPage()) || 1;
   
       if (!isNaN(newPage) && newPage >= 1 && newPage <= totalPages && newPage !== this.currentPage) {
         this.currentPage = newPage;
@@ -3365,6 +3101,47 @@ export function startGiftBook(forms) {
       }
     }
 
+    /**
+     * 根据金额可见状态刷新按钮文案。
+     */
+    updateTotalsVisibilityButton() {
+      const btn = this.ui.elements.totalsVisibilityBtn;
+      if (!btn) return;
+      btn.textContent = this.areTotalsVisible ? "隐藏金额" : "显示金额";
+      btn.setAttribute("aria-pressed", this.areTotalsVisible ? "true" : "false");
+    }
+
+    /**
+     * 隐藏页面顶部金额，进入或切换事项时默认执行。
+     */
+    hideTotals() {
+      this.areTotalsVisible = false;
+      if (this.ui.elements.pageSubtotalEl) this.ui.elements.pageSubtotalEl.textContent = "******";
+      if (this.ui.elements.totalAmountEl) this.ui.elements.totalAmountEl.textContent = "******";
+      this.updateTotalsVisibilityButton();
+    }
+
+    /**
+     * 切换顶部金额显示状态，显示前强制校验管理密码。
+     */
+    async toggleTotalsVisibility() {
+      if (!this.currentEvent) return;
+
+      if (this.areTotalsVisible) {
+        this.hideTotals();
+        return;
+      }
+
+      const password = await this.requestAdminPassword("显示金额", "请输入管理密码后显示本页小计和总金额。", null, true);
+      if (password === null) return;
+
+      this.areTotalsVisible = true;
+      this.giftManager.updateTotals();
+    }
+
+    /**
+     * 在创建事项表单中实时预览选择的界面风格。
+     */
     previewTheme(theme) {
       this.ui.applyTheme(theme || "theme-festive");
     }
@@ -3394,6 +3171,9 @@ export function startGiftBook(forms) {
       }
     }
 
+    /**
+     * 在首页事项列表中删除选中的事项，无需先进入事项详情。
+     */
     async handleDeleteSelectedEvent(eventId) {
       const event = await this.giftRepository.fetchEvent(eventId);
       if (!event) {
@@ -3469,7 +3249,7 @@ export function startGiftBook(forms) {
       const verifyContent = `
                     <div class="text-left">
                       <p class="mb-2">为确保管理密码输入无误，请再次输入以确认：</p>
-                      <input type="password" id="verify-create-pwd" class="w-full p-2 border rounded themed-ring" placeholder="再次输入管理密码">
+                      <input type="password" data-role="verify-create-password" class="w-full p-2 border rounded themed-ring" placeholder="再次输入管理密码">
                       <p class="text-xs text-gray-500 mt-2">提示：两次密码需完全一致，才可以创建事项。</p>
                     </div>
                   `;
@@ -3482,7 +3262,7 @@ export function startGiftBook(forms) {
           role: "primary",
           keepOpen: true,
           handler: async () => {
-            const verifyPwd = document.getElementById("verify-create-pwd").value;
+            const verifyPwd = this.ui.elements.modalContent.querySelector('[data-role="verify-create-password"]')?.value || "";
             if (verifyPwd !== password) {
               this.ui.showNotification("两次输入的管理密码不一致，请重新确认", "error");
               return;
@@ -3521,7 +3301,7 @@ export function startGiftBook(forms) {
         },
       ]);
   
-      setTimeout(() => document.getElementById("verify-create-pwd")?.focus(), 50);
+      setTimeout(() => this.ui.elements.modalContent.querySelector('[data-role="verify-create-password"]')?.focus(), 50);
     }
   
     /**
@@ -3743,7 +3523,7 @@ export function startGiftBook(forms) {
                         <p><strong>金额:</strong> ${giftData.amount.toFixed(2)} 元 (${escapeHtml(giftData.type)})</p>
                         ${remarkHtml}
                       </div>
-                      <button class="view-details-btn themed-button-primary px-3 py-1 rounded" data-gift-index="${r.originalIndex}">查看详情</button>
+                      <button data-role="view-details" class="themed-button-primary px-3 py-1 rounded" data-gift-index="${r.originalIndex}">查看详情</button>
                     </div>
                   `;
         })
@@ -3752,7 +3532,7 @@ export function startGiftBook(forms) {
       this.ui.showModal(`"${escapeHtml(searchTerm)}" 的搜索结果`, `<div class="max-h-80 overflow-y-auto">${resultsHtml}</div>`, [{ text: "关闭", class: "themed-button-secondary border px-4 py-2 rounded" }]);
   
       setTimeout(() => {
-        document.querySelectorAll(".view-details-btn").forEach((btn) => {
+        this.ui.elements.modalContent.querySelectorAll('[data-role="view-details"]').forEach((btn) => {
           btn.onclick = () => {
             const giftIndex = parseInt(btn.dataset.giftIndex, 10);
             this.ui.closeModal();
@@ -3797,17 +3577,17 @@ export function startGiftBook(forms) {
   
       // 根据剩余纠错/修改次数控制按钮是否可用及提示文案
       const correctNameButtonHtml = !isAbolished
-        ? `<button id="btn-correct-name" data-remaining-corrections="${remainingNameCorrections}" class="text-sm text-blue-600 hover:underline px-2 py-1 ${canCorrectName ? "" : "opacity-50 cursor-not-allowed"}" ${
+        ? `<button data-role="correct-name" data-remaining-corrections="${remainingNameCorrections}" class="text-sm text-blue-600 hover:underline px-2 py-1 ${canCorrectName ? "" : "opacity-50 cursor-not-allowed"}" ${
             canCorrectName ? "" : 'disabled data-fixed-disabled="true" title="姓名纠错次数已达上限"'
           }>纠错</button>`
         : "";
       const modifyAmountButtonHtml = !isAbolished
-        ? `<button id="btn-modify-amount" data-remaining-amount-corrections="${remainingAmountCorrections}" class="text-sm text-blue-600 hover:underline px-2 py-1 ${
+        ? `<button data-role="modify-amount" data-remaining-amount-corrections="${remainingAmountCorrections}" class="text-sm text-blue-600 hover:underline px-2 py-1 ${
             canModifyAmount ? "" : "opacity-50 cursor-not-allowed"
           }" ${canModifyAmount ? "" : 'disabled data-fixed-disabled="true" title="金额已修改，无法再次调整"'}>修改</button>`
         : "";
       const detailsHtml = `
-                  <div class="space-y-4 text-left h-full flex flex-col" id="current-details-container" data-gift-index="${giftIndex}">
+                  <div class="space-y-4 text-left h-full flex flex-col" data-role="current-details" data-gift-index="${giftIndex}">
                     <div class="flex justify-between items-center border-b pb-2 mb-2">
                       <h4 class="font-bold text-lg">当前记录信息</h4>
                     </div>
@@ -3823,14 +3603,14 @@ export function startGiftBook(forms) {
                         : ""
                     }
   
-                    <div id="name-display-area" class="flex justify-between items-center p-2 hover:bg-gray-50 rounded ${isAbolished ? "opacity-60" : ""}">
+                    <div data-role="name-display-area" class="flex justify-between items-center p-2 hover:bg-gray-50 rounded ${isAbolished ? "opacity-60" : ""}">
                       <div class="flex items-center gap-3 flex-wrap">
                         <div><strong>姓名:</strong> <span class="text-lg ml-2">${escapeHtml(g.name)}</span></div>
                         ${
                           !isAbolished
                             ? `
                           <div class="flex items-center gap-2">
-                            <select id="guest-level-select" class="text-sm px-3 py-1.5 border border-gray-300 rounded-md bg-white themed-ring cursor-pointer">
+                            <select data-role="guest-level-select" class="text-sm px-3 py-1.5 border border-gray-300 rounded-md bg-white themed-ring cursor-pointer">
                               ${levelOptions}
                             </select>
                           </div>
@@ -3841,7 +3621,7 @@ export function startGiftBook(forms) {
                       ${correctNameButtonHtml}
                     </div>
   
-                    <div id="amount-display-area" class="flex justify-between items-center p-2 hover:bg-gray-50 rounded ${isAbolished ? "opacity-60" : ""}">
+                    <div data-role="amount-display-area" class="flex justify-between items-center p-2 hover:bg-gray-50 rounded ${isAbolished ? "opacity-60" : ""}">
                       <div>
                         <p><strong>金额:</strong> <span class="font-bold themed-text text-lg ml-2 ${isAbolished ? "line-through" : ""}">${Utils.formatCurrency(g.amount)}</span></p>
                         <p class="text-sm text-gray-500 mt-1"><strong>类型:</strong> ${escapeHtml(g.type)}</p>
@@ -3849,10 +3629,10 @@ export function startGiftBook(forms) {
                       ${modifyAmountButtonHtml}
                     </div>
   
-                    <div id="remarks-display-area" class="p-2 hover:bg-gray-50 rounded ${isAbolished ? "opacity-60" : ""}">
+                    <div data-role="remarks-display-area" class="p-2 hover:bg-gray-50 rounded ${isAbolished ? "opacity-60" : ""}">
                       <div class="flex justify-between items-start">
                         <strong>备注:</strong>
-                        ${!isAbolished ? '<button id="btn-edit-remarks" class="text-sm text-blue-600 hover:underline px-2 py-1">修改</button>' : ""}
+                        ${!isAbolished ? '<button data-role="edit-remarks" class="text-sm text-blue-600 hover:underline px-2 py-1">修改</button>' : ""}
                       </div>
                       <div class="mt-1 text-gray-700 space-y-1">
                         ${this.formatRemarkDetailsDisplay(g.remarkData)}
@@ -3905,10 +3685,11 @@ export function startGiftBook(forms) {
   
       // 绑定编辑和作废按钮事件
       setTimeout(() => {
-        const btnCorrectName = document.getElementById("btn-correct-name");
-        const btnModifyAmount = document.getElementById("btn-modify-amount");
-        const btnEditRemarks = document.getElementById("btn-edit-remarks");
-        const levelSelect = document.getElementById("guest-level-select");
+        const modalContentEl = this.ui.elements.modalContent;
+        const btnCorrectName = modalContentEl.querySelector('[data-role="correct-name"]');
+        const btnModifyAmount = modalContentEl.querySelector('[data-role="modify-amount"]');
+        const btnEditRemarks = modalContentEl.querySelector('[data-role="edit-remarks"]');
+        const levelSelect = modalContentEl.querySelector('[data-role="guest-level-select"]');
   
         if (btnCorrectName && !btnCorrectName.disabled) btnCorrectName.onclick = () => this.enableInlineEdit(giftIndex, "name");
         if (btnModifyAmount && !btnModifyAmount.disabled) btnModifyAmount.onclick = () => this.enableInlineEdit(giftIndex, "amount");
@@ -4095,7 +3876,6 @@ export function startGiftBook(forms) {
         .join("");
   
       // === HTML 构建 ===
-      // 统一 ID 命名规范： style-cover-* 和 style-bg-*
       const content = `
           <div class="space-y-6 text-left max-h-[75vh] pr-1">
   
@@ -4109,7 +3889,7 @@ export function startGiftBook(forms) {
                               <label class="block text-sm font-bold text-gray-700">礼簿封面图</label>
                               <!-- 切换开关 -->
                               <label class="relative h-5 w-16 cursor-pointer">
-                                  <input type="checkbox" id="style-cover-toggle" class="sr-only peer" ${this.currentEvent.coverType === "custom" ? "checked" : ""}>
+                                  <input type="checkbox" data-role="style-cover-toggle" class="sr-only peer" ${this.currentEvent.coverType === "custom" ? "checked" : ""}>
                                   <div class="h-full w-full rounded-full bg-gray-300 transition-colors duration-300 peer-checked:bg-[var(--button-bg-color)]"></div>
                                   <span class="absolute right-4 top-1/2 -translate-y-1/2 text-[10px] font-bold transition-opacity duration-300 peer-checked:opacity-0">默认</span>
                                   <span class="absolute left-2 top-1/2 -translate-y-1/2 text-[10px] font-bold text-white opacity-0 transition-opacity duration-300 peer-checked:opacity-100">自定义</span>
@@ -4117,15 +3897,15 @@ export function startGiftBook(forms) {
                               </label>
                           </div>
                       </div>
-                      <div id="style-cover-section" class="mt-2 pl-1 ${this.currentEvent.coverType === "custom" ? "" : "hidden"}">
+                      <div data-role="style-cover-section" class="mt-2 pl-1 ${this.currentEvent.coverType === "custom" ? "" : "hidden"}">
                           <!-- 预览区 -->
-                          <div id="style-cover-preview-area" class="items-center gap-4 ${currentCoverUrl ? "flex" : "hidden"}">
-                            <img id="style-cover-img" src="${currentCoverUrl || ""}" alt="封面预览" class="rounded border bg-white p-1 h-16 w-auto object-contain shadow-sm">
-                            <button id="style-cover-remove-btn" class="text-sm text-red-600 hover:underline">删除封面图</button>
+                          <div data-role="style-cover-preview-area" class="items-center gap-4 ${currentCoverUrl ? "flex" : "hidden"}">
+                            <img data-role="style-cover-img" src="${currentCoverUrl || ""}" alt="封面预览" class="rounded border bg-white p-1 h-16 w-auto object-contain shadow-sm">
+                            <button data-role="style-cover-remove" class="text-sm text-red-600 hover:underline">删除封面图</button>
                           </div>
                           <!-- 上传区 -->
-                          <div id="style-cover-upload-area" class="${currentCoverUrl ? "hidden" : "block"}">
-                            <input type="file" id="style-cover-upload" accept="image/*" class="w-full mt-2 text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-gray-200 file:text-gray-700 hover:file:bg-gray-300" />
+                          <div data-role="style-cover-upload-area" class="${currentCoverUrl ? "hidden" : "block"}">
+                            <input type="file" data-role="style-cover-upload" accept="image/*" class="w-full mt-2 text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-gray-200 file:text-gray-700 hover:file:bg-gray-300" />
                              <p class="text-xs text-gray-500 mt-2 ml-1"> 建议尺寸 595 x 842px (A4纵向), 大小不超过2M。</p>
                           </div>
                       </div>
@@ -4136,14 +3916,14 @@ export function startGiftBook(forms) {
                       <label class="block text-sm font-bold text-gray-700 mb-2">礼簿页背景图</label>
   
                       <!-- 预览区 -->
-                      <div id="style-bg-preview-area" class="${bgUrl ? "flex" : "hidden"} items-center gap-4 transition-all">
-                        <img id="style-bg-img" src="${bgUrl || ""}" class="rounded border bg-white p-1 h-16 w-auto object-contain shadow-sm">
-                        <button id="style-bg-remove-btn" class="text-sm text-red-600 hover:underline">删除背景图</button>
+                      <div data-role="style-bg-preview-area" class="${bgUrl ? "flex" : "hidden"} items-center gap-4 transition-all">
+                        <img data-role="style-bg-img" src="${bgUrl || ""}" class="rounded border bg-white p-1 h-16 w-auto object-contain shadow-sm">
+                        <button data-role="style-bg-remove" class="text-sm text-red-600 hover:underline">删除背景图</button>
                       </div>
   
                       <!-- 上传区 -->
-                      <div id="style-bg-upload-area" class="${bgUrl ? "hidden" : "block"} transition-all">
-                         <input type="file" id="style-bg-upload" accept="image/*" class="w-full mt-2 text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-gray-200 file:text-gray-700 hover:file:bg-gray-300" />
+                      <div data-role="style-bg-upload-area" class="${bgUrl ? "hidden" : "block"} transition-all">
+                         <input type="file" data-role="style-bg-upload" accept="image/*" class="w-full mt-2 text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-gray-200 file:text-gray-700 hover:file:bg-gray-300" />
                          <p class="text-xs text-gray-500 mt-2 ml-1"> 建议浅色底纹。A4横版, 建议尺寸 842 x 595px。</p>
                       </div>
                   </div>
@@ -4155,20 +3935,20 @@ export function startGiftBook(forms) {
                 <!-- 保持原有打印选项逻辑不变 -->
                 <div class="flex gap-2 text-sm items-center flex-wrap">
                   <label class="block text-sm font-bold text-gray-700 ">礼簿附页选项：</label>
-                    <label class="flex items-center"><input type="checkbox" id="style-print-cover" class="w-4 h-4 themed-ring rounded mr-1" ${printOptions.printCover ? "checked" : ""}><span>封面</span></label>
-                    <label class="flex items-center"><input type="checkbox" id="style-show-cover-title" class="w-4 h-4 themed-ring rounded mr-1" ${
+                    <label class="flex items-center"><input type="checkbox" data-role="style-print-cover" class="w-4 h-4 themed-ring rounded mr-1" ${printOptions.printCover ? "checked" : ""}><span>封面</span></label>
+                    <label class="flex items-center"><input type="checkbox" data-role="style-show-cover-title" class="w-4 h-4 themed-ring rounded mr-1" ${
                       printOptions.showCoverTitle ? "checked" : ""
                     }><span>封面标题</span></label>
-                    <label class="flex items-center"><input type="checkbox" id="style-print-appendix" class="w-4 h-4 themed-ring rounded mr-1" ${
+                    <label class="flex items-center"><input type="checkbox" data-role="style-print-appendix" class="w-4 h-4 themed-ring rounded mr-1" ${
                       printOptions.printAppendix ? "checked" : ""
                     }><span>备注附录</span></label>
-                    <label class="flex items-center"><input type="checkbox" id="style-print-summary" class="w-4 h-4 themed-ring rounded mr-1" ${printOptions.printSummary ? "checked" : ""}><span>总计页</span></label>
-                    <label class="flex items-center"><input type="checkbox" id="style-print-end-page" class="w-4 h-4 themed-ring rounded mr-1" ${printOptions.printEndPage ? "checked" : ""}><span>封底</span></label>
+                    <label class="flex items-center"><input type="checkbox" data-role="style-print-summary" class="w-4 h-4 themed-ring rounded mr-1" ${printOptions.printSummary ? "checked" : ""}><span>总计页</span></label>
+                    <label class="flex items-center"><input type="checkbox" data-role="style-print-end-page" class="w-4 h-4 themed-ring rounded mr-1" ${printOptions.printEndPage ? "checked" : ""}><span>封底</span></label>
                 </div>
                 <div class="flex gap-2 text-sm items-center">
                     <label class="block text-sm font-bold text-gray-700 mr-1">礼簿每页显示条数:</label>
                     <div class="flex items-center gap-2">
-                        <input type="number" id="style-items-per-page" min="6" max="24" step="1" value="${this.getItemsPerPage()}"
+                        <input type="number" data-role="style-items-per-page" min="6" max="24" step="1" value="${this.getItemsPerPage()}"
                             class="w-12 p-2 border border-gray-300 rounded themed-ring text-center font-bold bg-white">
                         <span class="text-xs text-gray-500">建议 10-20</span>
                     </div>
@@ -4180,12 +3960,12 @@ export function startGiftBook(forms) {
               <div class="flex justify-between items-center mb-3 pb-2 border-b">
                   <h3 class="font-bold text-gray-800 text-sm">礼簿字体与颜色</h3>
                   <div class="flex gap-2">
-                      <button id="reset-style-btn" class="text-xs border border-gray-300 bg-white hover:bg-gray-100 text-gray-700 px-3 py-1.5 rounded shadow-sm transition-colors flex items-center">
+                      <button data-role="reset-style" class="text-xs border border-gray-300 bg-white hover:bg-gray-100 text-gray-700 px-3 py-1.5 rounded shadow-sm transition-colors flex items-center">
                           <i class="ri-refresh-line mr-1"></i>恢复默认
                       </button>
                       ${
                         "queryLocalFonts" in window
-                          ? `<button id="load-local-fonts-btn" class="text-xs themed-button-primary px-3 py-1.5 rounded shadow-sm transition-colors flex items-center"><i class="ri-font-size mr-1"></i>使用本地字体</button>`
+                          ? `<button data-role="load-local-fonts" class="text-xs themed-button-primary px-3 py-1.5 rounded shadow-sm transition-colors flex items-center"><i class="ri-font-size mr-1"></i>使用本地字体</button>`
                           : ""
                       }
                   </div>
@@ -4203,9 +3983,12 @@ export function startGiftBook(forms) {
           class: "themed-button-primary px-6 py-2 rounded font-bold",
           handler: async () => {
             try {
+              const modalContentEl = this.ui.elements.modalContent;
+              const getStyleField = (role) => modalContentEl?.querySelector(`[data-role="${role}"]`);
+
               // --- 背景图 ---
-              const bgFile = document.getElementById("style-bg-upload")?.files[0];
-              const isBgRemoved = document.getElementById("style-bg-preview-area").classList.contains("hidden");
+              const bgFile = getStyleField("style-bg-upload")?.files[0];
+              const isBgRemoved = getStyleField("style-bg-preview-area")?.classList.contains("hidden") ?? false;
   
               if (bgFile) {
                 if (bgFile.size > 10 * 1024 * 1024) {
@@ -4219,9 +4002,9 @@ export function startGiftBook(forms) {
               }
   
               // --- 封面图 ---
-              const coverFile = document.getElementById("style-cover-upload")?.files[0];
-              const isCoverRemoved = document.getElementById("style-cover-preview-area").classList.contains("hidden");
-              const isCoverCustom = document.getElementById("style-cover-toggle").checked;
+              const coverFile = getStyleField("style-cover-upload")?.files[0];
+              const isCoverRemoved = getStyleField("style-cover-preview-area")?.classList.contains("hidden") ?? false;
+              const isCoverCustom = getStyleField("style-cover-toggle")?.checked ?? false;
               let newCoverType = isCoverCustom ? "custom" : "default";
   
               // 特殊情况修正：选了自定义，但没图（旧的被删了且没新的），强制回退默认
@@ -4239,11 +4022,11 @@ export function startGiftBook(forms) {
               // === 保存打印选项 ===
               const pdfEngine = this.currentEvent.printOptions?.pdfEngine || "browser";
               const newPrintOptions = {
-                printCover: document.getElementById("style-print-cover").checked,
-                showCoverTitle: document.getElementById("style-show-cover-title").checked,
-                printAppendix: document.getElementById("style-print-appendix").checked,
-                printSummary: document.getElementById("style-print-summary").checked,
-                printEndPage: document.getElementById("style-print-end-page").checked,
+                printCover: getStyleField("style-print-cover")?.checked ?? printOptions.printCover,
+                showCoverTitle: getStyleField("style-show-cover-title")?.checked ?? printOptions.showCoverTitle,
+                printAppendix: getStyleField("style-print-appendix")?.checked ?? printOptions.printAppendix,
+                printSummary: getStyleField("style-print-summary")?.checked ?? printOptions.printSummary,
+                printEndPage: getStyleField("style-print-end-page")?.checked ?? printOptions.printEndPage,
                 pdfEngine: pdfEngine,
               };
   
@@ -4253,7 +4036,7 @@ export function startGiftBook(forms) {
   
               ["coverText", "pageInfo", "name", "type", "amountChinese"].forEach((field) => {
                 // 收集输入值
-                const fontSel = document.querySelector(`select[data-field="${field}"][data-prop="font"]`);
+                const fontSel = modalContentEl?.querySelector(`select[data-field="${field}"][data-prop="font"]`);
                 const inputFont = fontSel ? fontSel.value : "";
   
                 const fieldConfig = {};
@@ -4262,8 +4045,8 @@ export function startGiftBook(forms) {
   
                 if (field === "pageInfo") {
                   // 特殊处理 pageInfo 的两个颜色
-                  const themeColorInp = document.querySelector(`input[data-field="${field}"][data-prop="themeColor"]`);
-                  const baseColorInp = document.querySelector(`input[data-field="${field}"][data-prop="baseColor"]`);
+                  const themeColorInp = modalContentEl?.querySelector(`input[data-field="${field}"][data-prop="themeColor"]`);
+                  const baseColorInp = modalContentEl?.querySelector(`input[data-field="${field}"][data-prop="baseColor"]`);
   
                   const themeVal = themeColorInp ? themeColorInp.value.trim().toLowerCase() : null;
                   const baseVal = baseColorInp ? baseColorInp.value.trim().toLowerCase() : null;
@@ -4272,8 +4055,8 @@ export function startGiftBook(forms) {
                   if (baseVal && baseVal !== def.baseColor.toLowerCase()) fieldConfig.baseColor = baseVal;
                 } else {
                   // 标准处理 Size / Color
-                  const sizeInp = document.querySelector(`input[data-field="${field}"][data-prop="size"]`);
-                  const colorInp = document.querySelector(`input[data-field="${field}"][data-prop="color"]`);
+                  const sizeInp = modalContentEl?.querySelector(`input[data-field="${field}"][data-prop="size"]`);
+                  const colorInp = modalContentEl?.querySelector(`input[data-field="${field}"][data-prop="color"]`);
   
                   let inputSize = sizeInp && sizeInp.value ? parseInt(sizeInp.value) : null;
                   if (inputSize && isNaN(inputSize)) inputSize = null;
@@ -4287,8 +4070,8 @@ export function startGiftBook(forms) {
                 if (Object.keys(fieldConfig).length > 0) newStyle[field] = fieldConfig;
               });
   
-              const itemsPerPageInput = document.getElementById("style-items-per-page");
-              let newItemsPerPage = Math.min(Math.max(parseInt(itemsPerPageInput.value) || 12, 6), 24);
+              const itemsPerPageInput = getStyleField("style-items-per-page");
+              let newItemsPerPage = Math.min(Math.max(parseInt(itemsPerPageInput?.value) || 12, 6), 24);
   
               this.currentEvent.itemsPerPage = newItemsPerPage;
               this.currentEvent.customStyle = newStyle;
@@ -4318,13 +4101,16 @@ export function startGiftBook(forms) {
   
       // === 事件绑定 ===
       setTimeout(() => {
+        const modalContentEl = this.ui.elements.modalContent;
+        const getStyleField = (role) => modalContentEl?.querySelector(`[data-role="${role}"]`);
+
         // 辅助函数：绑定图片预览/移除逻辑
         const bindImageLogic = (prefix) => {
-          const uploadInput = document.getElementById(`${prefix}-upload`);
-          const previewArea = document.getElementById(`${prefix}-preview-area`);
-          const uploadArea = document.getElementById(`${prefix}-upload-area`);
-          const previewImg = document.getElementById(`${prefix}-img`);
-          const removeBtn = document.getElementById(`${prefix}-remove-btn`);
+          const uploadInput = getStyleField(`${prefix}-upload`);
+          const previewArea = getStyleField(`${prefix}-preview-area`);
+          const uploadArea = getStyleField(`${prefix}-upload-area`);
+          const previewImg = getStyleField(`${prefix}-img`);
+          const removeBtn = getStyleField(`${prefix}-remove`);
   
           if (uploadInput) {
             uploadInput.addEventListener("change", (e) => {
@@ -4332,10 +4118,10 @@ export function startGiftBook(forms) {
               if (file) {
                 const reader = new FileReader();
                 reader.onload = (evt) => {
-                  previewImg.src = evt.target.result;
-                  previewArea.classList.remove("hidden");
-                  previewArea.classList.add("flex");
-                  uploadArea.classList.add("hidden");
+                  if (previewImg) previewImg.src = evt.target.result;
+                  previewArea?.classList.remove("hidden");
+                  previewArea?.classList.add("flex");
+                  uploadArea?.classList.add("hidden");
                 };
                 reader.readAsDataURL(file);
               }
@@ -4343,11 +4129,11 @@ export function startGiftBook(forms) {
           }
           if (removeBtn) {
             removeBtn.onclick = () => {
-              previewImg.src = "";
-              uploadInput.value = ""; // 清空 input value
-              previewArea.classList.add("hidden");
-              previewArea.classList.remove("flex");
-              uploadArea.classList.remove("hidden");
+              if (previewImg) previewImg.src = "";
+              if (uploadInput) uploadInput.value = ""; // 清空 input value
+              previewArea?.classList.add("hidden");
+              previewArea?.classList.remove("flex");
+              uploadArea?.classList.remove("hidden");
             };
           }
         };
@@ -4357,16 +4143,16 @@ export function startGiftBook(forms) {
         bindImageLogic("style-bg");
   
         // 封面切换开关
-        const coverToggle = document.getElementById("style-cover-toggle");
-        const coverSection = document.getElementById("style-cover-section");
+        const coverToggle = getStyleField("style-cover-toggle");
+        const coverSection = getStyleField("style-cover-section");
         if (coverToggle) {
           coverToggle.addEventListener("change", (e) => {
-            coverSection.classList.toggle("hidden", !e.target.checked);
+            coverSection?.classList.toggle("hidden", !e.target.checked);
           });
         }
   
         // 颜色选择器实时预览
-        document.querySelectorAll('input[type="color"]').forEach((input) => {
+        modalContentEl?.querySelectorAll('input[type="color"]').forEach((input) => {
           input.addEventListener("input", (e) => {
             const val = e.target.value;
             const parent = e.target.parentNode;
@@ -4380,12 +4166,12 @@ export function startGiftBook(forms) {
         });
   
         // 重置按钮逻辑
-        document.getElementById("reset-style-btn")?.addEventListener("click", () => {
+        getStyleField("reset-style")?.addEventListener("click", () => {
           const defs = getDefaults();
           // 重置标准字段
           ["name", "type", "amountChinese", "coverText"].forEach((key) => {
-            const sInput = document.querySelector(`input[data-field="${key}"][data-prop="size"]`);
-            const cInput = document.querySelector(`input[data-field="${key}"][data-prop="color"]`);
+            const sInput = modalContentEl?.querySelector(`input[data-field="${key}"][data-prop="size"]`);
+            const cInput = modalContentEl?.querySelector(`input[data-field="${key}"][data-prop="color"]`);
             if (sInput) sInput.value = defs[key].size;
             if (cInput) {
               cInput.value = defs[key].color;
@@ -4393,8 +4179,8 @@ export function startGiftBook(forms) {
             }
           });
           // 重置 pageInfo 特殊字段
-          const themeInput = document.querySelector(`input[data-field="pageInfo"][data-prop="themeColor"]`);
-          const baseInput = document.querySelector(`input[data-field="pageInfo"][data-prop="baseColor"]`);
+          const themeInput = modalContentEl?.querySelector(`input[data-field="pageInfo"][data-prop="themeColor"]`);
+          const baseInput = modalContentEl?.querySelector(`input[data-field="pageInfo"][data-prop="baseColor"]`);
           if (themeInput) {
             themeInput.value = defs.pageInfo.themeColor;
             themeInput.dispatchEvent(new Event("input"));
@@ -4405,13 +4191,13 @@ export function startGiftBook(forms) {
           }
   
           // 重置所有字体选择
-          document.querySelectorAll('select[data-prop="font"]').forEach((sel) => (sel.value = ""));
+          modalContentEl?.querySelectorAll('select[data-prop="font"]').forEach((sel) => (sel.value = ""));
   
           this.ui.showNotification("已重置默认值 (需点击保存生效)", "info");
         });
   
         // 加载本地字体
-        document.getElementById("load-local-fonts-btn")?.addEventListener("click", async () => {
+        getStyleField("load-local-fonts")?.addEventListener("click", async () => {
           try {
             const fonts = await window.queryLocalFonts();
             const safeFonts = fonts.map((f) => ({
@@ -4541,7 +4327,7 @@ export function startGiftBook(forms) {
         ]);
       };
   
-      document.querySelectorAll(".btn-view-original, .btn-view-snapshot").forEach((btn) => {
+      this.ui.elements.modalContent.querySelectorAll('[data-role="view-original"], [data-role="view-snapshot"]').forEach((btn) => {
         btn.onclick = (e) => showSnapshot(parseInt(e.target.dataset.historyIndex));
       });
     }
@@ -4555,15 +4341,15 @@ export function startGiftBook(forms) {
      */
     enableInlineEdit(giftIndex, fieldType) {
       const g = this.gifts[giftIndex].data;
-      let targetAreaId, editHtml, saveHandler;
+      let targetAreaRole, editHtml, saveHandler;
       let nameEditConfig = null;
   
       // 统一管理详情区域的操作按钮，方便在编辑时禁用/恢复状态
-      const allButtons = ["btn-correct-name", "btn-modify-amount", "btn-edit-remarks"];
+      const allButtonRoles = ["correct-name", "modify-amount", "edit-remarks"];
       // 根据编辑状态临时禁用/恢复纠错、金额与备注按钮
       const setInlineButtonsDisabled = (disabled) => {
-        allButtons.forEach((btnId) => {
-          const btn = document.getElementById(btnId);
+        allButtonRoles.forEach((role) => {
+          const btn = this.ui.elements.modalContent.querySelector(`[data-role="${role}"]`);
           if (!btn) return;
           if (disabled) {
             btn.dataset.inlineDisabled = "true";
@@ -4583,8 +4369,8 @@ export function startGiftBook(forms) {
       };
   
       const cancelHandler = () => this.showGiftDetails(giftIndex);
-      const cancelBtnHtml = `<button id="inline-cancel" class="text-sm px-3 py-1 rounded themed-button-secondary border">取消</button>`;
-      const saveBtnHtml = `<button id="inline-save" class="text-sm px-3 py-1 rounded themed-button-primary">保存</button>`;
+      const cancelBtnHtml = `<button data-role="inline-cancel" class="text-sm px-3 py-1 rounded themed-button-secondary border">取消</button>`;
+      const saveBtnHtml = `<button data-role="inline-save" class="text-sm px-3 py-1 rounded themed-button-primary">保存</button>`;
   
       // 姓名纠错：按字符拆分并基于历史次数限制可编辑数量
       if (fieldType === "name") {
@@ -4606,11 +4392,11 @@ export function startGiftBook(forms) {
         // 展示剩余纠错次数，便于提示用户当前额度
         const remainingCorrections = Math.max(0, 2 - correctionCount);
         nameEditConfig = { originalChars, maxEditable };
-        targetAreaId = "name-display-area";
+        targetAreaRole = "name-display-area";
         editHtml = `
                   <div class="themed-edit-area text-center space-y-3">
                     <label class="block font-medium">纠错姓名</label>
-                    <div id="inline-name-inputs" class="flex justify-center gap-2 flex-wrap mb-1">
+                    <div data-role="inline-name-inputs" class="flex justify-center gap-2 flex-wrap mb-1">
                       ${originalChars
                         .map(
                           (char, index) =>
@@ -4626,7 +4412,7 @@ export function startGiftBook(forms) {
         saveHandler = async () => {
           if (!nameEditConfig) return cancelHandler();
           const { originalChars, maxEditable } = nameEditConfig;
-          const inputs = Array.from(document.querySelectorAll("#inline-name-inputs input"));
+          const inputs = Array.from(this.ui.elements.modalContent.querySelectorAll('[data-role="inline-name-inputs"] input'));
           if (inputs.length !== originalChars.length) return cancelHandler();
           const updatedChars = inputs.map((input) => input.value.trim());
           if (updatedChars.some((char) => char.length === 0)) {
@@ -4657,11 +4443,11 @@ export function startGiftBook(forms) {
           return;
         }
         setInlineButtonsDisabled(true);
-        targetAreaId = "amount-display-area";
+        targetAreaRole = "amount-display-area";
         editHtml = `
                   <div class="themed-edit-area">
                     <label>修改金额与类型</label>
-                    <input type="number" id="inline-edit-amount" value="${escapeHtml(g.amount)}" min="0" step="0.01" class="w-full p-2 border rounded themed-ring mb-2">
+                    <input type="number" data-role="inline-edit-amount" value="${escapeHtml(g.amount)}" min="0" step="0.01" class="w-full p-2 border rounded themed-ring mb-2">
                     <div class="flex flex-wrap gap-x-3 gap-y-1 mb-2">
                       ${["现金", "支付宝", "微信", "其他"]
                         .map(
@@ -4678,9 +4464,11 @@ export function startGiftBook(forms) {
                   </div>`;
         saveHandler = async () => {
           // 解析用户输入的金额，并同步记录新的收款方式
-          const newAmount = parseFloat(document.getElementById("inline-edit-amount").value);
-          const newType = document.querySelector('input[name="inline-edit-type"]:checked').value;
+          const targetArea = this.ui.elements.modalContent.querySelector(`[data-role="${targetAreaRole}"]`);
+          const newAmount = parseFloat(targetArea?.querySelector('[data-role="inline-edit-amount"]')?.value);
+          const newType = targetArea?.querySelector('input[name="inline-edit-type"]:checked')?.value;
           if (isNaN(newAmount) || newAmount < 0) return this.ui.showNotification("请输入有效金额。", "error");
+          if (!newType) return this.ui.showNotification("请选择收款类型。", "error");
   
           if (newAmount === g.amount && newType === g.type) return cancelHandler();
   
@@ -4765,17 +4553,17 @@ export function startGiftBook(forms) {
         setTimeout(() => {
           const firstRemarkKey = this.REMARK_LABELS.find((f) => f.key !== "custom")?.key;
           if (firstRemarkKey) {
-            document.querySelector(`[data-remark-type="${firstRemarkKey}"]`)?.focus();
+            this.ui.elements.modalContent.querySelector(`[data-remark-type="${firstRemarkKey}"]`)?.focus();
           }
         }, 50);
   
         return;
       }
-      const targetArea = document.getElementById(targetAreaId);
+      const targetArea = this.ui.elements.modalContent.querySelector(`[data-role="${targetAreaRole}"]`);
       if (targetArea) {
         targetArea.innerHTML = editHtml;
-        document.getElementById("inline-cancel").onclick = cancelHandler;
-        document.getElementById("inline-save").onclick = saveHandler;
+        targetArea.querySelector('[data-role="inline-cancel"]').onclick = cancelHandler;
+        targetArea.querySelector('[data-role="inline-save"]').onclick = saveHandler;
   
         // 绑定回车键保存逻辑
         const handleEnterKey = (e) => {
@@ -4793,7 +4581,7 @@ export function startGiftBook(forms) {
   
         // 姓名纠错专用交互：监听输入并在达上限时禁用其他字符
         if (fieldType === "name" && nameEditConfig) {
-          const nameInputsContainer = document.getElementById("inline-name-inputs");
+          const nameInputsContainer = targetArea.querySelector('[data-role="inline-name-inputs"]');
           if (nameInputsContainer) {
             const inputs = Array.from(nameInputsContainer.querySelectorAll("input"));
             const changedIndices = new Set();
@@ -4942,7 +4730,7 @@ export function startGiftBook(forms) {
         this.ui.elements.modal.classList.remove("modal-large");
         const content = `
                     ${(message && `<p class="text-sm text-gray-600 mb-3">${message}</p>`) || ""}
-                    <input type="password" id="admin-pwd-input" class="w-full p-2 border rounded themed-ring" placeholder="请输入管理密码">
+                    <input type="password" data-role="admin-password-input" class="w-full p-2 border rounded themed-ring" placeholder="请输入管理密码">
                   `;
   
         this.ui.showModal(title, content, [
@@ -4951,13 +4739,13 @@ export function startGiftBook(forms) {
             text: "确认",
             class: "themed-button-primary px-4 py-2 rounded",
             handler: () => {
-              const inputPassword = document.getElementById("admin-pwd-input").value;
+              const inputPassword = this.ui.elements.modalContent.querySelector('[data-role="admin-password-input"]')?.value || "";
               const isCorrect = CryptoService.hash(inputPassword) === hashToCompare;
   
               if (isCorrect) {
                 // 如果勾选了N分钟免密，则缓存密码
                 if (!forceVerify) {
-                  const skipVerify = document.getElementById("skip-verify-5min")?.checked;
+                  const skipVerify = this.ui.elements.modalActions.querySelector('[data-role="skip-admin-verify"]')?.checked;
                   if (skipVerify) {
                     this.cacheAdminPassword(inputPassword);
                   }
@@ -4979,12 +4767,14 @@ export function startGiftBook(forms) {
             checkboxDiv.className = "flex items-center mr-auto";
             const minutes = CONFIG.PASSWORD_CACHE_DURATION;
             checkboxDiv.innerHTML = `
-                        <input type="checkbox" id="skip-verify-5min" class="w-4 h-4  rounded themed-ring cursor-pointer">
-                        <label for="skip-verify-5min" class="ml-2 text-sm text-gray-600 cursor-pointer select-none whitespace-nowrap">${minutes}分钟内不再校验管理密码</label>
+                        <label class="flex items-center cursor-pointer select-none whitespace-nowrap">
+                          <input type="checkbox" data-role="skip-admin-verify" class="w-4 h-4 rounded themed-ring cursor-pointer">
+                          <span class="ml-2 text-sm text-gray-600">${minutes}分钟内不再校验管理密码</span>
+                        </label>
                       `;
             actionsContainer.insertBefore(checkboxDiv, actionsContainer.firstChild);
           }
-          document.getElementById("admin-pwd-input")?.focus();
+          this.ui.elements.modalContent.querySelector('[data-role="admin-password-input"]')?.focus();
         }, 50);
       });
     }
@@ -5062,7 +4852,7 @@ export function startGiftBook(forms) {
       // scope为真，说明是弹窗，范围是 #modal-content
       // 否则说明是主界面，范围是 #add-gift-form (这是您的思路)
   
-      const scope = isEdit ? document.getElementById("modal-content") : this.ui.elements.addGiftForm;
+      const scope = isEdit ? this.ui.elements.modalContent : this.ui.elements.addGiftForm;
       // 如果找不到范围，直接返回空，增加代码健壮性
       if (!scope) return {};
   
@@ -5260,40 +5050,40 @@ export function startGiftBook(forms) {
   <div class="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 text-left">
     <div class="space-y-4">
       <div>
-        <label for="edit-event-name-input" class="block text-sm font-medium text-gray-700">事项名称</label>
-        <input type="text" id="edit-event-name-input" class="w-full mt-1 p-2 border rounded themed-ring" value="${escapeHtml(this.currentEvent.name || "")}">
+        <label class="block text-sm font-medium text-gray-700">事项名称</label>
+        <input type="text" data-role="edit-event-name" class="w-full mt-1 p-2 border rounded themed-ring" value="${escapeHtml(this.currentEvent.name || "")}">
       </div>
 
       <div>
-        <label for="edit-event-theme" class="block text-sm font-medium text-gray-700">界面风格</label>
-        <select id="edit-event-theme" class="w-full mt-1 p-2 border rounded themed-ring">
+        <label class="block text-sm font-medium text-gray-700">界面风格</label>
+        <select data-role="edit-event-theme" class="w-full mt-1 p-2 border rounded themed-ring">
           <option value="theme-festive" ${this.currentEvent.theme !== "theme-solemn" ? "selected" : ""}>喜庆红 (喜事)</option>
           <option value="theme-solemn" ${this.currentEvent.theme === "theme-solemn" ? "selected" : ""}>肃穆灰 (白事)</option>
         </select>
       </div>
   
       <div>
-        <label for="edit-event-voice" class="block text-sm font-medium text-gray-700">语音播报音色</label>
+        <label class="block text-sm font-medium text-gray-700">语音播报音色</label>
         <div class="flex items-center gap-2 mt-1">
-          <select id="edit-event-voice" class="text-sm flex-grow w-full p-2 border rounded themed-ring">
+          <select data-role="edit-event-voice" class="text-sm flex-grow w-full p-2 border rounded themed-ring">
             <option value="">默认音色</option>
           </select>
-          <button type="button" id="preview-edit-voice-btn" class="themed-button-secondary border p-2 rounded whitespace-nowrap text-xs"><i class="ri-volume-up-line"></i> 预览</button>
+          <button type="button" data-role="preview-edit-voice" class="themed-button-secondary border p-2 rounded whitespace-nowrap text-xs"><i class="ri-volume-up-line"></i> 预览</button>
         </div>
       </div>
   
       <div>
-        <label for="edit-min-speech-amount" class="block text-sm font-medium text-gray-700">语音播报起报金额 (元)</label>
-        <input type="number" id="edit-min-speech-amount" min="0" step="1" class="w-full mt-1 p-2 border rounded themed-ring" value="${escapeHtml(this.currentEvent.minSpeechAmount || 0)}">
+        <label class="block text-sm font-medium text-gray-700">语音播报起报金额 (元)</label>
+        <input type="number" data-role="edit-min-speech-amount" min="0" step="1" class="w-full mt-1 p-2 border rounded themed-ring" value="${escapeHtml(this.currentEvent.minSpeechAmount || 0)}">
         <p class="text-xs text-gray-500 mt-1">只有大于或等于此金额的礼金才会被播报。设置为0则全部播报。</p>
       </div>
       <div>
-        <label for="edit-event-recorder" class="block text-sm font-medium text-gray-700">记账人</label>
-        <input type="text" id="edit-event-recorder" class="w-full mt-1 p-2 border rounded themed-ring" value="${escapeHtml(this.currentEvent.recorder || "")}">
+        <label class="block text-sm font-medium text-gray-700">记账人</label>
+        <input type="text" data-role="edit-event-recorder" class="w-full mt-1 p-2 border rounded themed-ring" value="${escapeHtml(this.currentEvent.recorder || "")}">
       </div>
       <div>
       <label class="flex items-center cursor-pointer">
-        <input type="checkbox" id="edit-hide-privacy" class="w-4 h-4 themed-ring rounded mr-2" ${this.currentEvent.hidePrivacy ? "checked" : ""}>
+        <input type="checkbox" data-role="edit-hide-privacy" class="w-4 h-4 themed-ring rounded mr-2" ${this.currentEvent.hidePrivacy ? "checked" : ""}>
         <span class="text-sm font-medium text-gray-700">副屏信息脱敏显示</span>
       </label>
       <p class="text-xs text-gray-500 mt-1">开启后，副屏仅显示最新录入记录的完整姓名，其他记录脱敏显示。</p>
@@ -5304,16 +5094,16 @@ export function startGiftBook(forms) {
       <div>
         <label class="block text-sm font-medium text-gray-700">事项开始时间</label>
         <div class="flex gap-2 mt-1">
-          <input type="date" id="edit-start-date" required class="w-full p-2 border rounded themed-ring" value="${escapeHtml(startDate || "")}">
-          <input type="time" id="edit-start-time" required class="w-full p-2 border rounded themed-ring" value="${escapeHtml(startTime || "")}">
+          <input type="date" data-role="edit-start-date" required class="w-full p-2 border rounded themed-ring" value="${escapeHtml(startDate || "")}">
+          <input type="time" data-role="edit-start-time" required class="w-full p-2 border rounded themed-ring" value="${escapeHtml(startTime || "")}">
         </div>
       </div>
   
       <div>
         <label class="block text-sm font-medium text-gray-700">事项结束时间</label>
         <div class="flex gap-2 mt-1">
-          <input type="date" id="edit-end-date" required class="w-full p-2 border rounded themed-ring" value="${escapeHtml(endDate || "")}">
-          <input type="time" id="edit-end-time" required class="w-full p-2 border rounded themed-ring" value="${escapeHtml(endTime || "")}">
+          <input type="date" data-role="edit-end-date" required class="w-full p-2 border rounded themed-ring" value="${escapeHtml(endDate || "")}">
+          <input type="time" data-role="edit-end-time" required class="w-full p-2 border rounded themed-ring" value="${escapeHtml(endTime || "")}">
         </div>
       </div>
   
@@ -5348,15 +5138,17 @@ export function startGiftBook(forms) {
           class: "themed-button-primary px-4 py-2 rounded",
           keepOpen: true,
           handler: async () => {
-            const newName = document.getElementById("edit-event-name-input").value.trim();
-            const newTheme = document.getElementById("edit-event-theme").value || "theme-festive";
-            const newVoiceName = document.getElementById("edit-event-voice").value;
-            const newMinSpeechAmount = parseFloat(document.getElementById("edit-min-speech-amount").value) || 0;
-            const newStartDateTime = `${document.getElementById("edit-start-date").value}T${document.getElementById("edit-start-time").value}`;
-            const newEndDateTime = `${document.getElementById("edit-end-date").value}T${document.getElementById("edit-end-time").value}`;
-            const newRecorder = document.getElementById("edit-event-recorder").value.trim();
-            const hidePrivacy = document.getElementById("edit-hide-privacy").checked;
-            const pdfEngineSelection = document.querySelector('input[name="edit-pdf-engine"]:checked')?.value || "browser";
+            const modalContentEl = this.ui.elements.modalContent;
+            const getField = (role) => modalContentEl.querySelector(`[data-role="${role}"]`);
+            const newName = getField("edit-event-name")?.value.trim() || "";
+            const newTheme = getField("edit-event-theme")?.value || "theme-festive";
+            const newVoiceName = getField("edit-event-voice")?.value || "";
+            const newMinSpeechAmount = parseFloat(getField("edit-min-speech-amount")?.value) || 0;
+            const newStartDateTime = `${getField("edit-start-date")?.value || ""}T${getField("edit-start-time")?.value || ""}`;
+            const newEndDateTime = `${getField("edit-end-date")?.value || ""}T${getField("edit-end-time")?.value || ""}`;
+            const newRecorder = getField("edit-event-recorder")?.value.trim() || "";
+            const hidePrivacy = !!getField("edit-hide-privacy")?.checked;
+            const pdfEngineSelection = modalContentEl.querySelector('input[name="edit-pdf-engine"]:checked')?.value || "browser";
   
             // 基础验证
             if (!newName) {
@@ -5423,15 +5215,16 @@ export function startGiftBook(forms) {
       ]);
   
       setTimeout(() => {
-        const voiceSelectElement = document.getElementById("edit-event-voice");
+        const modalContentEl = this.ui.elements.modalContent;
+        const voiceSelectElement = modalContentEl.querySelector('[data-role="edit-event-voice"]');
         this.populateVoiceList(voiceSelectElement, this.currentEvent.voiceName || "");
   
-        document.getElementById("preview-edit-voice-btn").addEventListener("click", () => {
+        modalContentEl.querySelector('[data-role="preview-edit-voice"]')?.addEventListener("click", () => {
           this.previewSelectedVoice(voiceSelectElement);
         });
   
         // 设置 PDF 引擎单选框状态
-        const pdfEngineRadio = document.querySelector(`input[name="edit-pdf-engine"][value="${this.currentEvent.printOptions?.pdfEngine || "browser"}"]`);
+        const pdfEngineRadio = modalContentEl.querySelector(`input[name="edit-pdf-engine"][value="${this.currentEvent.printOptions?.pdfEngine || "browser"}"]`);
         if (pdfEngineRadio) {
           pdfEngineRadio.checked = true;
         }
@@ -5488,7 +5281,7 @@ export function startGiftBook(forms) {
                          <li>系统会要求输入管理密码后才会执行删除。</li>
                        </ol>
                        <label class="flex items-center mt-4 p-3 bg-gray-50 rounded-lg border border-gray-200 cursor-pointer hover:bg-gray-100">
-                         <input id="confirm-exported" type="checkbox" class="w-4 h-4 text-red-600 bg-gray-100 border-gray-300 rounded">
+                         <input data-role="confirm-exported" type="checkbox" class="w-4 h-4 text-red-600 bg-gray-100 border-gray-300 rounded">
                          <span class="ml-3 text-sm font-medium text-gray-900">我已成功导出Excel备份</span>
                        </label>
                      </div>
@@ -5496,8 +5289,8 @@ export function startGiftBook(forms) {
   
       let hasExported = false;
       const updateDeleteButtonState = () => {
-        const checkbox = document.getElementById("confirm-exported");
-        const continueBtn = document.getElementById("btn-continue-delete");
+        const checkbox = this.ui.elements.modalContent.querySelector('[data-role="confirm-exported"]');
+        const continueBtn = this.ui.elements.modalActions.querySelector('[data-role="primary"]');
         if (continueBtn && checkbox) {
           const shouldEnable = hasExported && checkbox.checked;
           continueBtn.disabled = !shouldEnable;
@@ -5519,7 +5312,6 @@ export function startGiftBook(forms) {
         {
           text: "导出Excel备份",
           class: "themed-button-secondary border px-4 py-2 rounded",
-          id: "btn-export-excel",
           handler: async () => {
             hasExported = await this.exportService.exportToExcel() === true;
             setTimeout(updateDeleteButtonState, 10);
@@ -5529,10 +5321,9 @@ export function startGiftBook(forms) {
         {
           text: "已导出，继续删除",
           class: "themed-button-primary px-4 py-2 rounded",
-          id: "btn-continue-delete",
           role: "primary",
           handler: async () => {
-            const checkbox = document.getElementById("confirm-exported");
+            const checkbox = this.ui.elements.modalContent.querySelector('[data-role="confirm-exported"]');
             if (!hasExported || !checkbox || !checkbox.checked) {
               this.ui.showNotification("请先导出 Excel，并勾选确认后再继续。", "error");
               return;
@@ -5572,8 +5363,8 @@ export function startGiftBook(forms) {
       ]);
   
       setTimeout(() => {
-        const continueBtn = document.getElementById("btn-continue-delete");
-        const checkbox = document.getElementById("confirm-exported");
+        const continueBtn = this.ui.elements.modalActions.querySelector('[data-role="primary"]');
+        const checkbox = this.ui.elements.modalContent.querySelector('[data-role="confirm-exported"]');
         if (continueBtn) {
           continueBtn.disabled = true;
           continueBtn.classList.add("opacity-50", "cursor-not-allowed");
@@ -5708,7 +5499,7 @@ export function startGiftBook(forms) {
   // 语音列表更新
   if ("speechSynthesis" in window && window.speechSynthesis && speechSynthesis.onvoiceschanged !== undefined) {
     speechSynthesis.onvoiceschanged = () => {
-      const editVoiceSelect = document.getElementById("edit-event-voice");
+      const editVoiceSelect = app.ui?.elements?.modalContent?.querySelector('[data-role="edit-event-voice"]');
       if (editVoiceSelect) {
         app.populateVoiceList(editVoiceSelect, editVoiceSelect.value);
       }

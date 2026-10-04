@@ -43,7 +43,7 @@ app/
   composables/useLegacyPage.js  加载依赖并启动页面
   legacy/                   从原 HTML 提取的业务逻辑
 public/
-  static/                   原有图片、字体和第三方库
+  static/                   背景图、封面图和 PDF 字体
   styles/                   两个页面的样式
 ```
 
@@ -65,53 +65,13 @@ Excel、PDF、统计依赖按需加载。样式在构建时生成，修改业务
 ```sh
 pnpm build
 pnpm generate
-pnpm test
 ```
 
 `pnpm generate` 的静态文件位于 `.output/public`，使用 HTTP 静态服务部署。首页、宾客屏以及旧的 `.html` 地址均已配置。
 
-## Docker 部署
-
-服务器已安装 Docker 和 Docker Compose 后，在项目目录执行：
-
-```sh
-docker compose up -d --build
-```
-
-默认会启动在服务器 `3000` 端口：
-
-```text
-http://服务器IP:3000/
-```
-
-如果要换端口，可以临时指定：
-
-```sh
-APP_PORT=8080 docker compose up -d --build
-```
-
-如果不用 Compose，也可以直接构建运行：
-
-```sh
-docker build -t gift-book-nuxt .
-docker run -d --name gift-book-nuxt -p 3000:80 --restart unless-stopped gift-book-nuxt
-```
-
-如果部署到二级目录，优先保持 `.env` 里的 `NUXT_APP_BASE_URL=./`。如果你的反向代理或平台要求绝对路径，再改成类似：
-
-```env
-NUXT_APP_BASE_URL=/gift-book/
-```
-
-然后重新执行：
-
-```sh
-docker compose up -d --build
-```
-
-注意：系统数据仍保存在访问者自己的浏览器本地。换域名、换浏览器或清理浏览器数据后，看不到旧数据属于正常情况。
+如果部署到 Nginx，通常把 `.output/public` 里的内容上传到站点目录即可。部署到二级目录时，先确认 `.env` 里的 `NUXT_APP_BASE_URL` 和 Nginx 的访问路径一致。
 
 ## 来源
 
 原项目作者：jingguanzhang。此版本调整了 Nuxt 目录、路由和页面生命周期。
-原始许可见 `License`，原版项目说明见 `README.original.md`。
+原版项目说明见 `README.original.md`。

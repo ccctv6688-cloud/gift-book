@@ -26,6 +26,17 @@ function defaultValues() {
 const form = reactive(defaultValues())
 const voices = ref([])
 const speechSupported = ref(false)
+const createEventForm = ref(null)
+const eventNameInput = ref(null)
+const startDateInput = ref(null)
+const startTimeInput = ref(null)
+const endDateInput = ref(null)
+const endTimeInput = ref(null)
+const adminPasswordInput = ref(null)
+const eventThemeSelect = ref(null)
+const eventVoiceSelect = ref(null)
+const previewCreateVoiceBtn = ref(null)
+const eventRecorderInput = ref(null)
 let synthesis = null
 
 watch(
@@ -84,30 +95,45 @@ function reset() {
   emit('theme-change', form.theme)
 }
 
-defineExpose({ reset })
+defineExpose({
+  reset,
+  getElements: () => ({
+    createEventForm: createEventForm.value,
+    eventNameInput: eventNameInput.value,
+    startDateInput: startDateInput.value,
+    startTimeInput: startTimeInput.value,
+    endDateInput: endDateInput.value,
+    endTimeInput: endTimeInput.value,
+    adminPasswordInput: adminPasswordInput.value,
+    eventThemeSelect: eventThemeSelect.value,
+    eventVoiceSelect: eventVoiceSelect.value,
+    previewCreateVoiceBtn: previewCreateVoiceBtn.value,
+    eventRecorderInput: eventRecorderInput.value,
+  }),
+})
 </script>
 
 <template>
-  <form id="create-event-form" class="space-y-4" @submit.prevent="submit" @reset.prevent="reset">
+  <form ref="createEventForm" class="space-y-4" @submit.prevent="submit" @reset.prevent="reset">
     <fieldset :disabled="props.disabled" class="min-w-0 space-y-4">
-      <input id="event-name" v-model="form.name" type="text" placeholder="事项名称 (例如: 张三李四新婚之喜)" required class="w-full min-w-0 p-3 border rounded-lg focus:ring-2 themed-ring" />
+      <input ref="eventNameInput" v-model="form.name" type="text" placeholder="事项名称 (例如: 张三李四新婚之喜)" required class="w-full min-w-0 p-3 border rounded-lg focus:ring-2 themed-ring" />
       <div class="grid grid-cols-1 md:grid-cols-2 gap-4 min-w-0">
         <div class="min-w-0">
           <label class="block text-sm font-medium text-gray-700">开始时间</label>
           <div class="flex gap-2 min-w-0">
-            <input id="start-date" v-model="form.startDate" type="date" required class="w-full min-w-0 p-3 border rounded-lg focus:ring-2 themed-ring" />
-            <input id="start-time" v-model="form.startTime" type="time" required class="w-full min-w-0 p-3 border rounded-lg focus:ring-2 themed-ring" />
+            <input ref="startDateInput" v-model="form.startDate" type="date" required class="w-full min-w-0 p-3 border rounded-lg focus:ring-2 themed-ring" />
+            <input ref="startTimeInput" v-model="form.startTime" type="time" required class="w-full min-w-0 p-3 border rounded-lg focus:ring-2 themed-ring" />
           </div>
         </div>
         <div class="min-w-0">
           <label class="block text-sm font-medium text-gray-700">结束时间</label>
           <div class="flex gap-2 min-w-0">
-            <input id="end-date" v-model="form.endDate" type="date" required class="w-full min-w-0 p-3 border rounded-lg focus:ring-2 themed-ring" />
-            <input id="end-time" v-model="form.endTime" type="time" required class="w-full min-w-0 p-3 border rounded-lg focus:ring-2 themed-ring" />
+            <input ref="endDateInput" v-model="form.endDate" type="date" required class="w-full min-w-0 p-3 border rounded-lg focus:ring-2 themed-ring" />
+            <input ref="endTimeInput" v-model="form.endTime" type="time" required class="w-full min-w-0 p-3 border rounded-lg focus:ring-2 themed-ring" />
           </div>
         </div>
       </div>
-      <input id="admin-password" v-model="form.password" type="password" autocomplete="new-password" placeholder="设置管理密码 (请牢记)" required class="w-full min-w-0 p-3 border rounded-lg focus:ring-2 themed-ring" />
+      <input ref="adminPasswordInput" v-model="form.password" type="password" autocomplete="new-password" placeholder="设置管理密码 (请牢记)" required class="w-full min-w-0 p-3 border rounded-lg focus:ring-2 themed-ring" />
 
       <details class="group">
         <summary class="cursor-pointer text-sm font-medium text-gray-600 group-hover:text-gray-900 list-none">
@@ -118,27 +144,27 @@ defineExpose({ reset })
         </summary>
         <div class="mt-4 p-4 bg-gray-50 rounded-lg border min-w-0">
           <div>
-            <label for="event-theme" class="block text-sm font-medium text-gray-700">界面风格</label>
-            <select id="event-theme" v-model="form.theme" class="mt-1 w-full min-w-0 p-3 border rounded-lg focus:ring-2 themed-ring">
+            <label class="block text-sm font-medium text-gray-700">界面风格</label>
+            <select ref="eventThemeSelect" v-model="form.theme" class="mt-1 w-full min-w-0 p-3 border rounded-lg focus:ring-2 themed-ring">
               <option value="theme-festive">喜庆红 (喜事)</option>
               <option value="theme-solemn">肃穆灰 (白事)</option>
             </select>
             <p class="text-xs text-gray-500 mt-2">为不同性质的事项选择合适的界面配色风格。</p>
           </div>
           <div class="mt-4 min-w-0">
-            <label for="event-voice" class="block text-sm font-medium text-gray-700">语音播报音色</label>
+            <label class="block text-sm font-medium text-gray-700">语音播报音色</label>
             <div class="flex items-center gap-2 mt-1 min-w-0">
-              <select id="event-voice" v-model="form.voiceName" class="text-sm flex-grow w-full min-w-0 p-3 border rounded-lg focus:ring-2 themed-ring">
+              <select ref="eventVoiceSelect" v-model="form.voiceName" class="text-sm flex-grow w-full min-w-0 p-3 border rounded-lg focus:ring-2 themed-ring">
                 <option value="">{{ speechSupported ? '默认音色' : '设备不支持语音' }}</option>
                 <option v-for="voice in voices" :key="`${voice.name}-${voice.lang}`" :value="voice.name">{{ voice.name }} ({{ voice.lang }})</option>
               </select>
-              <button id="preview-create-voice-btn" type="button" :disabled="!speechSupported" class="themed-button-secondary border p-3 rounded-lg whitespace-nowrap text-xl shrink-0" @click="previewVoice"><i class="ri-volume-up-line"></i> 预览</button>
+              <button ref="previewCreateVoiceBtn" type="button" :disabled="!speechSupported" class="themed-button-secondary border p-3 rounded-lg whitespace-nowrap text-xl shrink-0" @click="previewVoice"><i class="ri-volume-up-line"></i> 预览</button>
             </div>
             <p class="text-xs text-gray-500 mt-2">选择一个喜欢的播报声音。</p>
           </div>
           <div class="mt-4">
             <label class="block text-sm font-medium text-gray-700">记账人</label>
-            <input id="event-recorder" v-model="form.recorder" type="text" placeholder="记账人 (例如: 王五，选填)" class="w-full min-w-0 mt-1 p-3 border rounded-lg focus:ring-2 themed-ring" />
+            <input ref="eventRecorderInput" v-model="form.recorder" type="text" placeholder="记账人 (例如: 王五，选填)" class="w-full min-w-0 mt-1 p-3 border rounded-lg focus:ring-2 themed-ring" />
           </div>
         </div>
       </details>

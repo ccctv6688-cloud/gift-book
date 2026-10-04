@@ -296,7 +296,7 @@ input[type="number"] {
 }
 
 /* ==================== 弹窗和打印容器 ==================== */
-#modal {
+.legacy-modal {
   display: flex;
   flex-direction: column;
   max-height: 90vh;
@@ -304,30 +304,30 @@ input[type="number"] {
   position: relative;
 }
 
-#modal-content {
+.legacy-modal-content {
   flex: 1;
   overflow-y: auto;
   padding-right: 0.5rem;
 }
-#modal-close-btn {
+.legacy-modal-close {
   position: absolute;
   top: 0.75rem;
   right: 0.75rem;
   color: #9ca3af;
   transition: color 0.2s ease-in-out;
 }
-#modal-close-btn:hover,
-#modal-close-btn:focus {
+.legacy-modal-close:hover,
+.legacy-modal-close:focus {
   color: #4b5563;
 }
-#modal-close-btn:focus-visible {
+.legacy-modal-close:focus-visible {
   outline: 2px solid var(--primary-ring-color);
   outline-offset: 2px;
 }
-body.printing #app-container {
+body.printing .app-container {
   display: none;
 }
-#modal.modal-large {
+.legacy-modal.modal-large {
   max-width: 1200px;
   width: 95vw;
 }

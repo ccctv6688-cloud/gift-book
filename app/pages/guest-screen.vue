@@ -1,63 +1,98 @@
 <script setup>
+import 'pell/dist/pell.min.css'
 import { startGuestScreen } from '~/legacy/guest-screen'
 
 definePageMeta({ alias: ['/guest-screen.html'] })
 
+const layoutRoot = ref(null)
+const qrCodeArea = ref(null)
+const alipayQrContainer = ref(null)
+const qrAlipayImg = ref(null)
+const wechatQrContainer = ref(null)
+const qrWechatImg = ref(null)
+const customTextDisplay = ref(null)
+const appContainer = ref(null)
+const eventTitle = ref(null)
+const giftBookContent = ref(null)
+const settingsBtn = ref(null)
+const settingsIcon = ref(null)
+const fullscreenBtn = ref(null)
+const fullscreenIcon = ref(null)
+const fullscreenHint = ref(null)
+const legacyModal = ref(null)
+
+function collectGuestElements() {
+  return {
+    layoutRoot: layoutRoot.value,
+    qrCodeArea: qrCodeArea.value,
+    qrAlipayContainer: alipayQrContainer.value,
+    qrAlipayImg: qrAlipayImg.value,
+    qrWechatContainer: wechatQrContainer.value,
+    qrWechatImg: qrWechatImg.value,
+    customTextDisplay: customTextDisplay.value,
+    appContainer: appContainer.value,
+    eventTitle: eventTitle.value,
+    giftBookContent: giftBookContent.value,
+    settingsBtn: settingsBtn.value,
+    settingsIcon: settingsIcon.value,
+    fullscreenBtn: fullscreenBtn.value,
+    fullscreenIcon: fullscreenIcon.value,
+    fullscreenHint: fullscreenHint.value,
+    ...legacyModal.value?.getElements(),
+  }
+}
+
 const { error } = useLegacyPage({
   title: "礼簿展示屏",
   bodyClass: "theme-festive",
-  styles: ["/static/remixicon.css","/static/pell.min.css","/styles/guest-screen.css"],
-  scripts: ["/static/pell.min.js"],
-  start: startGuestScreen,
+  styles: ["/styles/guest-screen.css"],
+  start() {
+    return startGuestScreen({
+      getElements: collectGuestElements,
+    })
+  },
 })
 </script>
 
 <template>
   <div>
     <p v-if="error" role="alert" class="startup-error">{{ error }}</p>
-    <!-- Legacy markup is managed by the existing application during migration. -->
-    <div v-pre>
-      <div id="layout-root" class="flex flex-row w-screen h-screen">
-        <div id="qr-code-area">
+    <div>
+      <div ref="layoutRoot" class="guest-layout-root flex flex-row w-screen h-screen">
+        <div ref="qrCodeArea" class="guest-qr-code-area">
           <div class="flex flex-1 flex-col min-h-0">
-            <div id="alipay-qr-container" class="qr-container" style="display: none">
+            <div ref="alipayQrContainer" class="qr-container" style="display: none">
               <p class="vertical-text">支付宝</p>
-              <img id="qr-alipay-img" src="" alt="Alipay" />
+              <img ref="qrAlipayImg" src="" alt="Alipay" />
             </div>
-            <div id="wechat-qr-container" class="qr-container" style="display: none">
+            <div ref="wechatQrContainer" class="qr-container" style="display: none">
               <p class="vertical-text">微信</p>
-              <img id="qr-wechat-img" src="" alt="WeChat Pay" />
+              <img ref="qrWechatImg" src="" alt="WeChat Pay" />
             </div>
           </div>
-          <div id="custom-text-display" class="custom-text-area"></div>
+          <div ref="customTextDisplay" class="custom-text-area"></div>
         </div>
       
-        <div id="app-container" class="hidden flex-1 h-full">
+        <div ref="appContainer" class="guest-app-container hidden flex-1 h-full">
           <div class="gift-book-frame">
             <div class="text-center mb-6">
-              <h1 id="event-title" class="text-4xl font-bold" style="color: var(--primary-color); letter-spacing: 8px">礼簿</h1>
+              <h1 ref="eventTitle" class="text-4xl font-bold" style="color: var(--primary-color); letter-spacing: 8px">礼簿</h1>
             </div>
-            <div id="gift-book-content" class="gift-book-content"></div>
+            <div ref="giftBookContent" class="gift-book-content"></div>
           </div>
           
-      <div id="top-right-controls">
-        <button id="settings-btn" title="设置">
-          <i id="settings-icon" class="ri-settings-3-line text-2xl"></i>
+      <div class="top-right-controls">
+        <button ref="settingsBtn" class="screen-icon-btn" title="设置">
+          <i ref="settingsIcon" class="ri-settings-3-line text-2xl screen-icon"></i>
         </button>
-        <button id="fullscreen-btn" title="全屏/退出全屏">
-          <i id="fullscreen-icon" class="ri-fullscreen-line text-2xl"></i>
+        <button ref="fullscreenBtn" class="screen-icon-btn" title="全屏/退出全屏">
+          <i ref="fullscreenIcon" class="ri-fullscreen-line text-2xl screen-icon"></i>
         </button>
       </div>
         </div>
       </div>
-      <div id="fullscreen-hint">按 F11 进入全屏以获得最佳效果</div>
-      <div id="modal-container" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center hidden z-50">
-        <div id="modal" class="bg-white p-6 rounded-lg shadow-xl">
-          <h3 id="modal-title" class="text-xl font-bold mb-4 text-center"></h3>
-          <div id="modal-content"></div>
-          <div id="modal-actions" class="mt-6 flex justify-end space-x-3"></div>
-        </div>
-      </div>
+      <div ref="fullscreenHint" class="fullscreen-hint">按 F11 进入全屏以获得最佳效果</div>
     </div>
+    <LegacyModal ref="legacyModal" />
   </div>
 </template>
